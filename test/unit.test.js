@@ -276,6 +276,36 @@ test('the cache hit rate is read over every billed prompt bucket', async () => {
   )
 })
 
+test('a model lookup that throws costs the price, not the whole strip', async () => {
+  // The regression this guards: the model is decoration on figures that must
+  // render without it, but reading it reaches two services this query does not
+  // own. Unguarded, either one throwing took the cache rate and token counts
+  // down with the price.
+  const values = {
+    sessionStats: { turns: 2, steps: 8, llmMs: 4000, toolMs: 500, ttftMs: 900, ttftSteps: 3, decodeMs: 2000, decodeTokens: 300 },
+    tokenUsage: { uncachedInputTokens: 1000, cacheReadTokens: 9000, outputTokens: 400 },
+  }
+  const withServices = (services) => mockCtx({
+    sessionProjectionCache: { coldSnapshot: async () => ({ values }) },
+    ...services,
+  })
+
+  const hostile = [
+    ['agentDefaultModel', { agentDefaultModel: { currentSelection: () => { throw new Error('no selection yet') } } }],
+    ['agents', { agents: { get: () => { throw new Error('unknown session') } } }],
+  ]
+
+  for (const [name, services] of hostile) {
+    const stats = await readSessionStats(withServices(services), 'session-1')
+
+    assert.notEqual(stats, undefined, `${name} throwing must not erase the strip`)
+    assert.equal(stats.cacheHit, 0.9, 'the figures the projection did supply still render')
+    assert.equal(stats.inputTokens, 10_000)
+    assert.equal(stats.model, undefined, 'and the model is simply unknown, so nothing is priced')
+    assert.equal(statsLine(stats, translator('en')).includes('CN¥'), false)
+  }
+})
+
 test('pricing splits the day at the published Beijing boundaries', () => {
   // Fixed instants, expressed in UTC: the host clock must not decide the price.
   const beijing = (hour) => new Date(Date.UTC(2026, 7, 20, (hour - 8 + 24) % 24, 30))
