@@ -15,7 +15,8 @@ import { createMirror } from '../lib/mirror.js'
 import { createActivityTracker } from '../lib/activity.js'
 import { assembleContextFor, serviceForAgent } from '../lib/scope.js'
 import { readAttachments } from '../lib/attachments.js'
-import { installQuestionProvider } from '../lib/questions.js'
+import { answerQuestionModal, installQuestionProvider } from '../lib/questions.js'
+import { installQuestionMirror } from '../lib/questions-mirror.js'
 import { actionButtons, decodeAction, isActionInteraction } from '../lib/actions.js'
 import { applyMenu, buildMenu, decodeMenu, encodeMenu, isMenuInteraction } from '../lib/menu.js'
 import { listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
@@ -1663,6 +1664,203 @@ test('a prompt keeps its own words first when files come with it', () => {
   assert.equal(message.content.length, 2)
   assert.equal(message.content[0].text, 'look at this', 'the transcript renders what the person said, not the file dump')
   assert.ok(Object.isFrozen(message.content[1]))
+})
+
+/**
+ * A Discord channel whose one card can be driven from a test: `sent` resolves
+ * with the collector's handlers once the card is posted.
+ * @returns {object} the channel plus hooks into the card it will post.
+ */
+function questionChannelStub() {
+  const edits = []
+  let announce
+  const sent = new Promise((resolve) => { announce = resolve })
+  const handlers = {}
+  const channel = {
+    isTextBased: () => true,
+    send: async (payload) => {
+      const card = {
+        edit: async (next) => { edits.push(next) },
+        createMessageComponentCollector: () => ({
+          on: (event, fn) => { handlers[event] = fn },
+          stop: (reason) => { handlers.end?.([], reason) },
+        }),
+      }
+      announce({ payload, handlers, card })
+      return card
+    },
+  }
+  return { channel, sent, edits, handlers }
+}
+
+/** Let the pending microtasks run — the collector is attached after the send resolves. */
+const tick = () => new Promise((resolve) => setImmediate(resolve))
+
+/** A select-menu click by the guild owner, choosing option `index`. */
+const pick = (index) => ({
+  isStringSelectMenu: () => true,
+  isButton: () => false,
+  values: [String(index)],
+  user: { id: 'owner-1', tag: 'owner#1' },
+  guild: { ownerId: 'owner-1' },
+  update: async () => {},
+  reply: async () => {},
+})
+
+test('losing the seam mirrors questions through the gateway instead of giving up', async () => {
+  // The web UI owns the seam, so the bot goes in the other way: same pending
+  // question, answered through the same entry point the browser uses.
+  const { channel, sent, handlers } = questionChannelStub()
+  const responses = []
+  const question = {
+    id: 'q1',
+    question: 'Where should it run?',
+    options: [{ label: 'Local' }, { label: 'Cloud' }],
+  }
+
+  const mirror = installQuestionMirror({
+    ctx: mockCtx({
+      apiProxy: {
+        events: {
+          async *mux(_request, signal) {
+            yield { rpcId: 'rpc-1', payload: { type: 'question/requested', sessionId: 'session-x', questions: [question] } }
+            await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+          },
+        },
+        respond: async (message) => { responses.push(message); return { accepted: true } },
+      },
+    }),
+    config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
+    logger: { warn() {}, info() {} },
+    client: () => ({ channels: { fetch: async () => channel }, guilds: { cache: { get: () => undefined } } }),
+    resolver: { locate: async () => ({ channelId: 'c1' }) },
+    runs: new Map(),
+  })
+  assert.equal(typeof mirror, 'function', 'a composed gateway gives the mirror somewhere to attach')
+
+  await sent
+  await tick()
+  await handlers.collect(pick(1))
+  await tick()
+
+  assert.equal(responses.length, 1)
+  const [message] = responses
+  assert.equal(message.rpcId, 'rpc-1', 'the gateway matches the answer to its own pending ask by this id')
+  assert.equal(message.result.ok, true)
+  assert.equal(message.result.value.sessionId, 'session-x')
+  // The gateway validates every selected value against that question's own
+  // option labels, so the label travels — not the index the menu carried.
+  assert.deepEqual(message.result.value.answer.answers, [{ id: 'q1', selected: ['Cloud'] }])
+
+  mirror()
+})
+
+test('a typed answer travels as custom, which is the only field it is legal in', async () => {
+  // `selected` is checked against the question's options, so free text placed
+  // there is rejected as an illegal choice — the gateway's own rule.
+  const { channel, sent, handlers } = questionChannelStub()
+  const responses = []
+
+  const mirror = installQuestionMirror({
+    ctx: mockCtx({
+      apiProxy: {
+        events: {
+          async *mux(_request, signal) {
+            yield {
+              rpcId: 'rpc-2',
+              payload: { type: 'question/requested', sessionId: 'session-y', questions: [{ id: 'q1', question: 'Which port?', options: [{ label: '3000' }] }] },
+            }
+            await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+          },
+        },
+        respond: async (message) => { responses.push(message); return { accepted: true } },
+      },
+    }),
+    config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
+    logger: { warn() {}, info() {} },
+    client: () => ({ channels: { fetch: async () => channel }, guilds: { cache: { get: () => undefined } } }),
+    resolver: { locate: async () => ({ channelId: 'c1' }) },
+    runs: new Map(),
+  })
+
+  await sent
+  await tick()
+  const modalId = await new Promise((resolve) => {
+    void handlers.collect({
+      isButton: () => true,
+      isStringSelectMenu: () => false,
+      customId: 'dsh-question-custom-1',
+      user: { id: 'owner-1', tag: 'owner#1' },
+      guild: { ownerId: 'owner-1' },
+      reply: async () => {},
+      showModal: async (modal) => { resolve(modal.data.custom_id) },
+    })
+  })
+
+  await answerQuestionModal({
+    customId: modalId,
+    fields: { getTextInputValue: () => '8080' },
+    user: { id: 'owner-1', tag: 'owner#1' },
+    reply: async () => {},
+  }, translator('en'))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(responses[0].result.value.answer.answers, [{ id: 'q1', selected: [], custom: '8080' }])
+
+  mirror()
+})
+
+test('a question settled elsewhere retracts its Discord card and answers nothing', async () => {
+  const { channel, sent, edits } = questionChannelStub()
+  const responses = []
+  let push
+
+  const mirror = installQuestionMirror({
+    ctx: mockCtx({
+      apiProxy: {
+        events: {
+          async *mux(_request, signal) {
+            yield { rpcId: 'rpc-3', payload: { type: 'question/requested', sessionId: 'session-z', questions: [{ id: 'q1', question: 'Ready?', options: [{ label: 'Yes' }] }] } }
+            const next = await new Promise((resolve) => {
+              push = resolve
+              signal.addEventListener('abort', () => resolve(undefined), { once: true })
+            })
+            if (next !== undefined) yield next
+            await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+          },
+        },
+        respond: async (message) => { responses.push(message); return { accepted: true } },
+      },
+    }),
+    config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
+    logger: { warn() {}, info() {} },
+    client: () => ({ channels: { fetch: async () => channel }, guilds: { cache: { get: () => undefined } } }),
+    resolver: { locate: async () => ({ channelId: 'c1' }) },
+    runs: new Map(),
+  })
+
+  await sent
+  push({ payload: { type: 'question/resolved', sessionId: 'session-z', questionRpcId: 'rpc-3', outcome: 'answered' } })
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(responses.length, 0, 'the mirror never settles an ask it does not own')
+  assert.equal(edits.length, 1, 'the card retracts itself')
+  assert.deepEqual(edits[0].components, [])
+
+  mirror()
+})
+
+test('the mirror needs a gateway, and says nothing when there is none', () => {
+  const absent = installQuestionMirror({
+    ctx: mockCtx({}),
+    config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
+    logger: { warn() {}, info() {} },
+    client: () => undefined,
+    resolver: { locate: async () => ({}) },
+    runs: new Map(),
+  })
+  assert.equal(absent, undefined, 'a tui profile composes no apiproxy; there is nothing to mirror')
 })
 
 test('the questions provider declines a seam someone else owns', () => {

@@ -305,6 +305,17 @@ patch 層的 plugin 列會**比它後面那些 bundle 更早**套用，所以在
 `dsh-host-apiproxy` 自己的註冊失敗，**整個 harness 直接開不起來**。等到 gateway 起來才接管，
 就把這個 bot 排到最後 —— 只要有任何 UI 擁有那個接縫，它早就拿走了，而這個 bot 會退讓。
 
+過去退讓就結束了，而這正好把這個 bot 存在的理由晾在一邊：一個停下來問問題的 turn，
+會一直停到有人坐到瀏覽器前面為止。所以搶輸接縫的 bot 改走另一條路進去。它是跟 gateway
+跑在**同一個 cordis context** 裡的 plugin，所以 `ctx.apiProxy` —— 瀏覽器透過 HTTP 對話的
+那個物件本身 —— 在這裡就是一個直接呼叫：不用開埠、不用憑證、不用第二套傳輸。
+訂閱它的事件流就拿得到網頁 UI 正在顯示的那些待答問題，答案也走網頁 UI 用的同一個入口回去。
+
+**兩邊同時有效。** gateway 會在結算一個待答問題之前先把它移除，所以誰先回答誰算數，
+另一邊的卡片會自己收起來 —— 手機或瀏覽器，你先碰到哪個就用哪個。這個模式唯一不做的事
+就是替人決定：它並不擁有這次詢問，所以沒人回答的卡片只會安靜失效，並說明問題還在網頁介面等著。
+送出取消會直接結算掉一個可能有人正在看的問題。
+
 開啟之後，每道問題會以一張帶選單的卡片送達，並受同一份允許名單保護。有選項可以直接選；
 無論有沒有選項，都可以按 **✍️ 自行輸入** 開 modal 打自由文字，所以開放式問題也能回答。
 沒人回答的卡片會在十五分鐘後**拒絕**這次詢問 —— 這裡沒有 `next()` 可以把問題交回去，
@@ -354,7 +365,7 @@ LLM 與工具耗時、首字時間、解碼速率、快取命中、token 數。�
 | `mirrorSubagents` | `false` | 推播是否包含子代理工作階段。一個 turn 可以展開出十幾個。 |
 | `mirrorNewSessions` | `true` | 新工作階段建立時在頻道公告一則。只在 `mirror` 開啟時有作用。 |
 | `mirrorApprovals` | `false` | 連不是這個 bot 發起的工作階段，授權問題也送到 Discord。**web 端的人得等這張卡片的兩分鐘。** |
-| `answerQuestions` | `false` | 接管 `ask_user_question` 接縫，用 Discord 選單回答。**單一 provider：已經被自家 UI 佔用的 profile 會安靜退讓，而搶先佔用則會弄壞那個 UI。** |
+| `answerQuestions` | `false` | 在 Discord 回答 `ask_user_question`。接縫沒人佔就接管；被 UI 佔走則改鏡射 gateway 的待答問題，**兩邊都能回答，誰先答誰算數**。 |
 | `followNewWorkspaces` | `true` | 出現未對應工作區的新工作階段時自動建立頻道。 |
 | `traceLimit` | `25` | `/dsh trace` 預設筆數 —— 也是 `/dsh timeline` 的預設筆數。 |
 | `sessionLimit` | `15` | `/dsh sessions` 預設筆數。 |
@@ -463,7 +474,8 @@ npm test          # 76 個單元測試 —— 不需網路、不需 harness、�
 | `lib/mirror.js` | 推播端：緩衝、一個 turn 一則訊息、呼叫額度 |
 | `lib/activity.js` | 誰正在工作，來自 `agent/status` |
 | `lib/scope.js` | 讀取關在 agent preset realm 裡的服務 |
-| `lib/questions.js` | `ask_user_question` provider（本 bot 接管時） |
+| `lib/questions.js` | 問題卡片，以及本 bot 接管接縫時的 `ask_user_question` provider |
+| `lib/questions-mirror.js` | 接縫被 UI 佔走時，改用 `ctx.apiProxy` 驅動同一張卡片 |
 | `lib/attachments.js` | 頻道檔案，讀成提示的 content block |
 | `lib/routing.js` | 工作階段 → 工作區 → 頻道的解析與快取，與授權卡片共用 |
 | `lib/menu.js` | `/dsh menu` 卡片與它的無狀態元件 |

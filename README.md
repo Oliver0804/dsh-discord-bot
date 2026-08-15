@@ -346,6 +346,22 @@ activation makes `dsh-host-apiproxy` fail its own registration and **the whole
 harness refuses to boot**. Waiting until the gateway is up puts this bot last in
 line — wherever a UI owns the seam it has already taken it and this one declines.
 
+Declining used to end it, which left the case this bot exists for unserved: a
+turn that stops to ask a question stops until somebody is at the browser. So a
+bot that loses the seam goes in the other way. It is a plugin inside the same
+cordis context as the gateway, which makes `ctx.apiProxy` — the very object the
+browser talks to over HTTP — a direct call from here, with no port, no
+credentials and no second carrier. Subscribing to its event stream yields the
+same pending questions the web UI renders, and answers go back through the same
+entry point the web UI uses.
+
+**Both surfaces stay live.** The gateway removes a pending question before
+settling it, so whoever answers first wins and the other card retracts itself —
+answer on your phone or at the browser, whichever you reach. What this mode
+never does is decide anything: it does not own the ask, so an unanswered card
+expires quietly and says the question is still waiting in the web UI. Cancelling
+would settle a question someone may be reading right now.
+
 With it on, each question arrives as a card with a menu, gated by the same
 allowlist. If the question has options you can pick one; either way a
 **✍️ Custom answer** button opens a modal for free text, so an open-ended
@@ -402,7 +418,7 @@ cannot change them.
 | `mirrorSubagents` | `false` | Include subagent sessions in the mirror. One turn can fan out to a dozen. |
 | `mirrorNewSessions` | `true` | Announce a newly created session in its channel. Only applies while `mirror` is on. |
 | `mirrorApprovals` | `false` | Answer approval questions for sessions this bot did not start. **A web-side user then waits out the card's two minutes.** |
-| `answerQuestions` | `false` | Claim the `ask_user_question` seam and answer it with Discord menus. **Single-provider: a profile whose UI already owns it declines, and claiming it first would break that UI.** |
+| `answerQuestions` | `false` | Answer `ask_user_question` from Discord. Claims the seam where it is free; where a UI owns it, mirrors the gateway's questions instead so **both surfaces can answer and the first one wins**. |
 | `followNewWorkspaces` | `true` | Create a channel when a session appears for an unmapped workspace. |
 | `traceLimit` | `25` | Default entries per `/dsh trace` — also the default per `/dsh timeline`. |
 | `sessionLimit` | `15` | Default sessions per `/dsh sessions`. |
@@ -526,7 +542,8 @@ Layout:
 | `lib/mirror.js` | The push side: buffering, one message per turn, the call budget |
 | `lib/activity.js` | Who is working right now, from `agent/status` |
 | `lib/scope.js` | Reading services that live inside an agent's preset realm |
-| `lib/questions.js` | The `ask_user_question` provider, when this bot claims it |
+| `lib/questions.js` | The question card, and the `ask_user_question` provider when this bot claims the seam |
+| `lib/questions-mirror.js` | The same card driven through `ctx.apiProxy`, when a UI owns the seam |
 | `lib/attachments.js` | Channel files, read into prompt content blocks |
 | `lib/routing.js` | Session → workspace → channel, cached, shared with approvals |
 | `lib/menu.js` | The `/dsh menu` card and its stateless components |
