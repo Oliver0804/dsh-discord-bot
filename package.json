@@ -14,7 +14,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "dsh-discord-bot-setup": "./bin/setup.js"
+    "dsh-discord-bot-setup": "bin/setup.js"
   },
   "scripts": {
     "test": "node --test 'test/*.test.js'"
