@@ -77,12 +77,15 @@ says so on every sync.
 for anything you do not pass, and refuses without touching the profile if a row already exists:
 
 ```bash
-# from a local checkout
-node /path/to/dsh-discord-bot/bin/setup.js --profile web
-
-# once published to npm
-npx dsh-discord-bot-setup --profile web
+git clone https://github.com/Oliver0804/dsh-discord-bot
+cd dsh-discord-bot
+npm install
+node bin/setup.js --profile web
 ```
+
+The setup script packs the checkout into a tarball, installs that into the profile, writes the
+token, and appends the plugin row — see *Development* for why it installs a tarball rather than
+linking the directory.
 
 Non-interactive:
 
@@ -136,7 +139,7 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 | `/dsh run <prompt>` | Send work to the workspace's agent and watch the turn. Needs `allowRun`. |
 | `/dsh lineage [session]` | Ancestor and descendant sessions. |
 | `/dsh model [to]` | Show the default model, or switch it (autocompleted from the provider catalog). |
-| `/dsh workspace <path>` | Register a directory as a workspace and give it a channel. |
+| `/dsh workspace <path>` | Register a directory as a workspace and give it a channel (path is autocompleted). |
 | `/dsh status` | Mounted services, session counts, mapped workspaces. |
 | `/dsh sync` | Re-sync the category, its channels, and their privacy now. |
 
@@ -150,14 +153,18 @@ a profile has no settings provider, so the write is read back and a switch that 
 reported as a failure rather than as success.
 
 `workspace` takes an absolute path to an existing directory *on the harness machine* and syncs
-immediately, so the new channel appears in the same breath.
+immediately, so the new channel appears in the same breath. Its `path` is autocompleted against the
+real filesystem — type a partial path to walk it, or a bare name to match directories sitting
+alongside workspaces the harness already knows. Typing a full path on a phone is not a reasonable
+thing to ask, and the harness resolves nothing relative to Discord.
+
+Autocomplete answers only for people on the allowlist. Session titles and directory names are real
+information about the machine, so the hints are gated exactly like the commands.
 
 ### Running work, and approvals
 
-`run` continues the workspace's newest session — a live agent is used as-is, a cold one is resumed
-with its own tools, prompt, and sandbox intact. A workspace with no session yet is refused rather
-than given a fresh agent, because an agent created outside the entry points that wire up presets
-would have no tools and could only talk.
+`run` continues the workspace's newest session — a live agent is used as-is, a cold one is resumed,
+and a workspace with no session yet gets a fresh one rooted at its directory.
 
 The turn is reported by rewriting one message every few seconds — Discord allows about five
 messages per five seconds per channel, and a busy turn emits hundreds of events. Reasoning blocks

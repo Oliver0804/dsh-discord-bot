@@ -70,12 +70,14 @@ https://discord.com/oauth2/authorize?client_id=<APP_ID>&permissions=268487696&sc
 互動詢問；若已存在設定列，會在完全不動 profile 的情況下直接拒絕：
 
 ```bash
-# 從本地 checkout
-node /path/to/dsh-discord-bot/bin/setup.js --profile web
-
-# 發佈到 npm 之後
-npx dsh-discord-bot-setup --profile web
+git clone https://github.com/Oliver0804/dsh-discord-bot
+cd dsh-discord-bot
+npm install
+node bin/setup.js --profile web
 ```
+
+安裝腳本會把 checkout 打包成 tarball 裝進 profile、寫入 token、附加設定列 ——
+為什麼是裝 tarball 而不是 link 目錄，見*開發與建置*一節。
 
 非互動模式：
 
@@ -129,7 +131,7 @@ pnpm add dsh-discord-bot
 | `/dsh run <prompt>` | 把工作送給該工作區的代理並即時觀看。需要 `allowRun`。 |
 | `/dsh lineage [session]` | 上游與下游的工作階段關係。 |
 | `/dsh model [to]` | 顯示或切換預設模型（選項由 provider 目錄自動完成）。 |
-| `/dsh workspace <path>` | 把一個目錄註冊成工作區，並建立對應頻道。 |
+| `/dsh workspace <path>` | 把一個目錄註冊成工作區並建立頻道（路徑有自動完成）。 |
 | `/dsh status` | 已掛載的服務、工作階段數量、已對應的工作區。 |
 | `/dsh sync` | 立即重新同步類別、頻道與其私密設定。 |
 
@@ -141,12 +143,16 @@ pnpm add dsh-discord-bot
 讀回比對，沒有真的生效就回報失敗，而不是假裝成功。
 
 `workspace` 接受**harness 這台機器上**已存在目錄的絕對路徑，成功後立即同步，新頻道會同時出現。
+`path` 會**對真實檔案系統做自動完成**：打一段路徑就往下走，打一個純名稱則會比對「harness
+已知工作區的兄弟目錄」。在手機上手打完整路徑並不合理，而 harness 不會解析任何相對於 Discord 的路徑。
+
+自動完成同樣只回答允許名單上的人：工作階段標題與目錄名稱都是關於這台機器的真實資訊，
+因此提示與指令受同一道關卡保護。
 
 ### 執行工作與授權卡片
 
-`run` 接續該工作區最新的工作階段：已在運行的代理直接用，冷的則 resume 回來（連同它原本的工具、
-prompt 與 sandbox）。**還沒有任何工作階段的工作區會被拒絕**，而不是幫它開一個新代理 ——
-在 preset 接線之外建出來的代理沒有工具，只會空談。
+`run` 接續該工作區最新的工作階段：已在運行的代理直接用，冷的則 resume 回來，
+而**還沒有任何工作階段的工作區會直接建一個新的**，根目錄就是該工作區。
 
 Turn 的回報方式是**每隔幾秒改寫同一則訊息**：Discord 大約限制每個頻道 5 則訊息 / 5 秒，
 而一個忙碌的 turn 會產生數百個事件。即時視圖會濾掉推理區塊，完整紀錄之後用 `/dsh trace` 看。

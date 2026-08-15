@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,7 +10,7 @@ import { PermissionFlagsBits } from 'discord.js'
 import { channelSlug, deniesEveryone, workspaceIdFromTopic } from '../lib/topology.js'
 import { displayEntry, resolveAgent, userMessage } from '../lib/run.js'
 import { installApprovalAnswerer } from '../lib/approval.js'
-import { listWorkspaces } from '../lib/workspaces.js'
+import { listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
 import {
   createWorkspace,
   listSubagents,
@@ -137,6 +137,32 @@ test('normalized config trims and drops empty optionals', () => {
   assert.equal(config.token, undefined, 'a whitespace token is no token')
   assert.equal(config.tokenFile, '/tmp/t')
   assert.equal(config.categoryName, 'team')
+})
+
+test('directory suggestions complete paths and match names', async () => {
+  // Typing an absolute path on a phone is the reason this exists.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-suggest-'))
+  mkdirSync(join(root, 'projects', 'alpha-tool'), { recursive: true })
+  mkdirSync(join(root, 'projects', 'beta-tool'), { recursive: true })
+  mkdirSync(join(root, 'projects', '.hidden'), { recursive: true })
+  writeFileSync(join(root, 'projects', 'a-file.txt'), 'x')
+
+  const known = [{ path: join(root, 'projects', 'alpha-tool') }]
+
+  const inside = await suggestDirectories(`${join(root, 'projects')}/`, known, 25)
+  assert.ok(inside.includes(join(root, 'projects', 'beta-tool')))
+  assert.ok(!inside.some((path) => path.endsWith('.hidden')), 'dotfiles are noise')
+  assert.ok(!inside.some((path) => path.endsWith('a-file.txt')), 'only directories are workspaces')
+
+  const prefixed = await suggestDirectories(join(root, 'projects', 'be'), known, 25)
+  assert.deepEqual(prefixed, [join(root, 'projects', 'beta-tool')], 'a partial last segment filters its parent')
+
+  // The case from the phone: a bare name, resolved against sibling directories
+  // of workspaces the harness already knows.
+  const byName = await suggestDirectories('beta', known, 25)
+  assert.deepEqual(byName, [join(root, 'projects', 'beta-tool')])
+
+  assert.deepEqual(await suggestDirectories('/no/such/place/x', known, 25), [], 'an unreadable parent yields nothing, not a throw')
 })
 
 test('an externally locked category is recognized as private', () => {
