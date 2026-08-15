@@ -132,6 +132,7 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 
 | Command | Answers |
 |---|---|
+| `/dsh help` | What you can do here, and how to start. |
 | `/dsh sessions [limit]` | Sessions in this workspace: title, live or cold, age. |
 | `/dsh trace [session] [limit] [everything]` | The trajectory — what was asked, answered, and which tools ran. |
 | `/dsh timeline [session] [limit]` | The raw event timeline plus a type histogram. |
@@ -209,6 +210,21 @@ Declined messages are ignored silently. This handler sees every message in the g
 the ones it rejects would turn ordinary conversation into a stream of refusals — and telling an
 unauthorized member that they are unauthorized only advertises that the bot is worth probing.
 
+### Language
+
+Replies come in English, Traditional Chinese or Simplified Chinese. `language: auto` (the default)
+follows the locale of whoever ran the command, which is the closest a shared channel message gets to
+per-viewer text; set it explicitly to pin one language for everyone.
+
+Command names and descriptions are localized by **Discord itself**, so the picker is always in each
+person's own client language regardless of this setting — that surface is private to the reader,
+while a reply is one message everyone in the channel sees.
+
+`/dsh trace` and `/dsh timeline` carry the session's whole-log statistics in their footer — turns,
+steps, LLM and tool time, time to first token, decode rate, cache hit, and token counts. These are
+dsh's own folded figures, the same ones the web chat's stats strip renders, so paging and compaction
+cannot change them.
+
 ## Configuration
 
 | Key | Default | Meaning |
@@ -223,6 +239,7 @@ unauthorized member that they are unauthorized only advertises that the bot is w
 | `allowRun` | `false` | Enable `/dsh run`. **Grants the allowlist agent execution on this machine.** |
 | `listenToMessages` | `off` | `off` / `mention` / `all` — treat channel messages as prompts. Needs `allowRun` and the Message Content intent. |
 | `runVerbosity` | `minimal` | `minimal` shows the answer; `full` streams the whole transcript. |
+| `language` | `auto` | `auto` / `en` / `zh-Hant` / `zh-Hans` — the language replies are written in. |
 | `followNewWorkspaces` | `true` | Create a channel when a session appears for an unmapped workspace. |
 | `traceLimit` | `25` | Default entries per `/dsh trace`. |
 | `sessionLimit` | `15` | Default sessions per `/dsh sessions`. |

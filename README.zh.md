@@ -124,6 +124,7 @@ pnpm add dsh-discord-bot
 
 | 指令 | 回答什麼 |
 |---|---|
+| `/dsh help` | 你可以在這裡做什麼，以及怎麼開始。 |
 | `/dsh sessions [limit]` | 這個工作區的工作階段：標題、是否運行中、時間。 |
 | `/dsh trace [session] [limit] [everything]` | 軌跡 —— 問了什麼、回答什麼、跑了哪些工具。 |
 | `/dsh timeline [session] [limit]` | 原始事件時間軸與型別統計。 |
@@ -190,6 +191,18 @@ Discord 會直接拒絕整條連線**，所以 bot 只在這個設定開啟時�
 被拒絕的訊息一律**靜默忽略**：這個 handler 會看到伺服器裡的每一則訊息，逐一回覆拒絕會把正常
 對話變成一串拒絕訊息 —— 而且告訴未授權的人「你沒有權限」，等於告訴他這個 bot 值得試探。
 
+### 語言
+
+回覆支援英文、繁體中文、簡體中文。`language: auto`（預設）會**跟隨執行指令那個人的 locale**，
+這是共享頻道訊息最接近「因人而異」的做法；也可以指定一種語言，對所有人固定。
+
+指令名稱與描述由 **Discord 自己在地化**，所以不論這個設定為何，每個人看到的指令選單都是他自己的
+client 語言 —— 那個介面是讀者私有的，而回覆是頻道裡所有人都看得到的同一則訊息。
+
+`/dsh trace` 與 `/dsh timeline` 的 footer 會帶上該工作階段的**全紀錄統計** —— 輪數、步數、
+LLM 與工具耗時、首字時間、解碼速率、快取命中、token 數。這些是 dsh 自己摺算的數字，
+跟 web 聊天介面那條統計列同源，所以翻頁與壓縮都不會改變它們。
+
 ## 設定項
 
 | 鍵 | 預設 | 意義 |
@@ -204,6 +217,7 @@ Discord 會直接拒絕整條連線**，所以 bot 只在這個設定開啟時�
 | `allowRun` | `false` | 啟用 `/dsh run`。**等於把這台機器的代理執行權交給名單上的人。** |
 | `listenToMessages` | `off` | `off` / `mention` / `all` —— 把頻道訊息當成 prompt。需要 `allowRun` 與 Message Content intent。 |
 | `runVerbosity` | `minimal` | `minimal` 只給答案；`full` 串流完整過程。 |
+| `language` | `auto` | `auto` / `en` / `zh-Hant` / `zh-Hans` —— 回覆使用的語言。 |
 | `followNewWorkspaces` | `true` | 出現未對應工作區的新工作階段時自動建立頻道。 |
 | `traceLimit` | `25` | `/dsh trace` 預設筆數。 |
 | `sessionLimit` | `15` | `/dsh sessions` 預設筆數。 |

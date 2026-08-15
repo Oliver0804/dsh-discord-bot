@@ -11,6 +11,7 @@ import { channelSlug, deniesEveryone, workspaceIdFromTopic } from '../lib/topolo
 import { displayEntry, resolveAgent, userMessage } from '../lib/run.js'
 import { installApprovalAnswerer } from '../lib/approval.js'
 import { listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
+import { LANGUAGES, commandText, fromDiscordLocale, translator } from '../lib/i18n.js'
 import {
   createWorkspace,
   listSubagents,
@@ -25,9 +26,11 @@ import {
   renderModel,
   renderModelSwitched,
   renderSessions,
+  renderHelp,
   renderSubagents,
   renderTrajectory,
   renderWorkspaceCreated,
+  statsLine,
 } from '../lib/render.js'
 
 /**
@@ -137,6 +140,98 @@ test('normalized config trims and drops empty optionals', () => {
   assert.equal(config.token, undefined, 'a whitespace token is no token')
   assert.equal(config.tokenFile, '/tmp/t')
   assert.equal(config.categoryName, 'team')
+})
+
+test('a Discord locale picks the right script, and auto follows the caller', () => {
+  // Region is not what a reader notices; script is.
+  assert.equal(fromDiscordLocale('zh-TW'), 'zh-Hant')
+  assert.equal(fromDiscordLocale('zh-CN'), 'zh-Hans')
+  assert.equal(fromDiscordLocale('en-GB'), 'en')
+  assert.equal(fromDiscordLocale('ja'), 'en', 'a language we do not ship falls back rather than breaking')
+  assert.equal(fromDiscordLocale(undefined), 'en')
+
+  assert.equal(translator('auto', 'zh-TW').lang, 'zh-Hant')
+  assert.equal(translator('zh-Hans', 'zh-TW').lang, 'zh-Hans', 'an explicit setting overrides the caller')
+})
+
+test('every shipped language answers every key', () => {
+  // A missing key falls back to English, which is survivable — but a key that
+  // is missing everywhere would render as a raw dotted identifier in a channel.
+  const keys = ['sessions.empty', 'trace.footer', 'status.title', 'model.changed', 'approval.allow',
+    'sync.private', 'error.notAllowed', 'help.title', 'stats.line', 'common.none']
+
+  for (const lang of LANGUAGES) {
+    const t = translator(lang)
+    for (const key of keys) {
+      assert.notEqual(t(key), key, `${lang} is missing ${key}`)
+    }
+  }
+
+  // Placeholders are filled, and an unknown one is left visible rather than
+  // silently becoming "undefined".
+  assert.equal(translator('en')('sessions.footer', { shown: 1, total: 2, path: '/w' }), '1 of 2 session(s) · /w')
+  assert.match(translator('en')('sessions.footer', {}), /\{shown\}/)
+})
+
+test('an error reads in the reader\'s language but logs in English', async () => {
+  // The query layer has no idea who is asking; the surface that renders the
+  // reply does. Carrying the key rather than the prose is what lets both be
+  // right at once.
+  const failure = await resolveAgent(mockCtx({}), [], new Map(), { path: '/x' }).catch((error) => error)
+
+  assert.equal(failure.key, 'error.serviceMissing')
+  assert.deepEqual(failure.params, { service: 'agents' })
+  assert.match(failure.message, /is not mounted/, 'the logged message stays searchable in English')
+
+  assert.match(renderError(failure, translator('zh-Hant')).embeds[0].toJSON().description, /沒有掛載/)
+  assert.match(renderError(failure, translator('zh-Hans')).embeds[0].toJSON().description, /没有挂载/)
+  assert.match(renderError(failure, translator('en')).embeds[0].toJSON().description, /is not mounted/)
+
+  // A plain Error still renders, just untranslated.
+  assert.match(renderError(new Error('boom'), translator('zh-Hant')).embeds[0].toJSON().description, /boom/)
+})
+
+test('command descriptions carry Discord localizations', () => {
+  const { value, localizations } = commandText('cmd.trace')
+  assert.ok(value.length > 0)
+  assert.ok(localizations['zh-TW'].length > 0)
+  assert.ok(localizations['zh-CN'].length > 0)
+  assert.notEqual(localizations['zh-TW'], localizations['zh-CN'], 'the two scripts are not the same text')
+})
+
+test('the stats strip reads like the harness figures it comes from', () => {
+  const stats = {
+    turns: 3, steps: 4, llmMs: 6600, toolMs: 0, ttftMs: 900,
+    tokensPerSecond: 137.4, cacheHit: 0.512, inputTokens: 27_500, outputTokens: 516,
+  }
+  const line = statsLine(stats, translator('en'))
+
+  assert.match(line, /^\n/, 'it appends to an existing footer')
+  assert.match(line, /3 turns · 4 steps/)
+  assert.match(line, /LLM 6\.6s/)
+  assert.match(line, /tools 0s/, 'zero is a real answer, not a blank')
+  assert.match(line, /137 tok\/s/)
+  assert.match(line, /51%/)
+  assert.match(line, /27\.5K/)
+  assert.match(line, /516/)
+
+  assert.equal(statsLine(undefined, translator('en')), '', 'no projection seam means no strip, not a broken one')
+})
+
+test('help lists commands in the reader\'s language', () => {
+  const meta = { categoryName: 'dsh', allowRun: false, chatMode: 'off' }
+
+  const en = renderHelp(meta, translator('en')).embeds[0].toJSON()
+  assert.match(en.title, /what you can do/)
+  assert.match(en.fields[0].value, /\/dsh sessions/)
+  assert.match(en.fields[2].value, /allowRun/, 'a disabled run says how to enable it')
+
+  const zh = renderHelp(meta, translator('zh-Hant')).embeds[0].toJSON()
+  assert.match(zh.title, /你可以在這裡做什麼/)
+  assert.match(zh.fields[0].value, /讀取工作階段的軌跡/, 'help reuses the command descriptions')
+
+  const chatty = renderHelp({ ...meta, allowRun: true, chatMode: 'all' }, translator('zh-Hant')).embeds[0].toJSON()
+  assert.match(chatty.fields[2].value, /每一則訊息都會派工/)
 })
 
 test('directory suggestions complete paths and match names', async () => {
