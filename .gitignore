@@ -1,0 +1,13 @@
+node_modules/
+*.tgz
+
+# Secrets never belong in this tree. The bot token lives in $DSH_HOME
+# (written mode 600 by bin/setup.js), never in the repo — these patterns are
+# the backstop for a token pasted somewhere by mistake.
+.env
+.env.local
+*.token
+*.secret
+
+*.log
+.DS_Store

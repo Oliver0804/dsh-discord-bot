@@ -1,0 +1,40 @@
+{
+  "name": "dsh-discord-bot",
+  "version": "0.1.0",
+  "description": "Map dsh workspaces onto a Discord category — query session trajectories and live subagents from anywhere, with no inbound port.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-discord-bot-setup": "./bin/setup.js"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "README.md",
+    "README.zh.md",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "cordis-plugin",
+    "discord",
+    "discord-bot",
+    "remote-access"
+  ],
+  "license": "MIT"
+}
