@@ -120,6 +120,12 @@ function installSpec() {
  * `dsh plugin add` does this itself; `pnpm add` does not, and this script calls
  * pnpm directly so that it works whether or not `dsh` is on the PATH.
  *
+ * Unlike the patch layer — which this script only ever appends to, because it is
+ * hand-edited and commented — the manifest is rewritten whole, which reorders
+ * its keys. That is the one file here written by tools rather than by hand
+ * (`pnpm` has just rewritten it moments earlier), and the profile is not running
+ * while its operator is installing into it, so there is no writer to race.
+ *
  * @param {string} profileDir - the profile directory.
  * @returns {boolean} true when the list was changed.
  */
