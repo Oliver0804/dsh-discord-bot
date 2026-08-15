@@ -257,6 +257,29 @@ If a token is ever pasted into a shell, a chat, or a commit, treat it as burned:
 Developer Portal and rewrite the token file. A leaked bot token lets anyone read every channel the
 bot can see.
 
+### If the category already exists and is already private
+
+A fresh install needs no manual permission work: the bot creates the category itself and writes its
+own access in at creation, so the category is private, the bot can see it, and every channel under
+it inherits both.
+
+The one case that breaks is a category that was **made private by hand before the bot was
+introduced**, with no exception for the bot. The bot is then locked out of the channel tree it is
+supposed to manage — it cannot restrict channels, cannot create new ones there, and cannot receive
+messages for chat mode. Slash commands still work, because an interaction carries its own token.
+
+The invite URL cannot fix this. `permissions=` grants guild-level permissions, and a channel
+overwrite beats a guild-level permission; the only thing that bypasses overwrites is
+`Administrator`, which is far too much to hand a bot for this. Pick one instead:
+
+- **Grant it once** — category → *Edit Category* → *Permissions* → add the bot, allow *View
+  Channel*. Existing channels and their history are kept, and the bot takes over from there.
+- **Let the bot start clean** — point `categoryName` at a name that does not exist yet, and the
+  next sync builds a correct one. The old channels stay where they are.
+
+After either, `/dsh sync` reports `🔒 private` without the "set outside the bot" note, which is how
+you know the bot is managing it rather than merely observing it.
+
 ## Behaviour worth knowing
 
 - **A failure never takes dsh down.** A bad token, a revoked permission, or no network logs a
