@@ -491,6 +491,44 @@ test('a workspace with no sessions gets a fresh one, rooted at its directory', a
   assert.equal(mountedOn, agentCtx, 'the preset is mounted onto the agent\'s own scope')
 })
 
+test('a created session is filed on its workspace, not left ungrouped', async () => {
+  // Workspace membership is an explicit account, not something inferred from
+  // cwd — skip the attach and the session shows up under "Ungrouped" in dsh
+  // despite having the right directory.
+  const attached = []
+  const agents = {
+    get: () => undefined,
+    resume: async () => { throw new Error('nothing to resume') },
+    create: async (options) => ({ agent: { session: { id: options.sessionId } }, dispose: async () => {} }),
+  }
+  const registry = { get: (id) => (id === 'ws-1' ? { attachSession: async (sid) => { attached.push(sid) } } : undefined) }
+  const ctx = mockCtx({ agents, workspaceRegistry: registry })
+  const workspace = { id: 'ws-1', title: 'Gamma', path: '/work/gamma', sessionIds: [], synthetic: false }
+
+  const agent = await resolveAgent(ctx, [], new Map(), workspace)
+  assert.deepEqual(attached, [String(agent.session.id)])
+
+  // A resumed session is filed too, which repairs one that ended up unfiled.
+  const resuming = mockCtx({
+    agents: { ...agents, resume: async (o) => ({ agent: { session: { id: o.resumeSessionId } }, dispose: async () => {} }) },
+    workspaceRegistry: registry,
+  })
+  await resolveAgent(resuming, [{ id: 'session-was-ungrouped' }], new Map(), workspace)
+  assert.deepEqual(attached.at(-1), 'session-was-ungrouped')
+
+  // A synthesized workspace has no record to attach to, and grouping there is
+  // derived from cwd anyway.
+  const before = attached.length
+  const synthetic = { id: 'cwd-x', title: 'S', path: '/work/s', sessionIds: [], synthetic: true }
+  await resolveAgent(ctx, [], new Map(), synthetic)
+  assert.equal(attached.length, before)
+
+  // An attach that rejects leaves the session usable rather than failing the run.
+  const hostile = mockCtx({ agents, workspaceRegistry: { get: () => ({ attachSession: async () => { throw new Error('nope') } }) } })
+  const survived = await resolveAgent(hostile, [], new Map(), workspace)
+  assert.ok(survived.session.id, 'unfiled but usable')
+})
+
 test('a missing agents service is named, not crashed on', async () => {
   await assert.rejects(
     () => resolveAgent(mockCtx({}), [{ id: 'session-1' }], new Map(), { path: '/x' }),
