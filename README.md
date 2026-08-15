@@ -1,5 +1,7 @@
 # dsh-discord-bot
 
+![dsh-discord-bot](docs/banner.png)
+
 English | [中文](README.zh.md)
 
 Projects a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) onto one Discord

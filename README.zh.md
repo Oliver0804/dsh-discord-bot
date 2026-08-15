@@ -1,5 +1,7 @@
 # dsh-discord-bot
 
+![dsh-discord-bot](docs/banner.png)
+
 [English](README.md) | 中文
 
 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 投影到一個 Discord 伺服器：
