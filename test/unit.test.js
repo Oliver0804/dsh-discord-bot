@@ -19,6 +19,7 @@ import { installQuestionProvider } from '../lib/questions.js'
 import { actionButtons, decodeAction, isActionInteraction } from '../lib/actions.js'
 import { applyMenu, buildMenu, decodeMenu, encodeMenu, isMenuInteraction } from '../lib/menu.js'
 import { listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
+import { createRouter } from '../lib/router.js'
 import { LANGUAGES, commandText, fromDiscordLocale, translator } from '../lib/i18n.js'
 import {
   cancelSession,
@@ -876,6 +877,35 @@ test('session text cannot break out of the message or ping the server', () => {
   assert.ok(!description.includes('@everyone'), 'mentions are neutralized')
 })
 
+test('a tool result is shown as data, not as markdown it happens to contain', () => {
+  // Reading a README puts its own headings into the trace. Left alone, Discord
+  // renders `# Blogger MCP Server` several times the size of everything around
+  // it and one file read swallows the page.
+  const readme = '# Blogger MCP Server\nA working MCP server.\n## Features\n- Get blog information\n1. First\n> quoted'
+  const trajectory = {
+    total: 2,
+    entries: [
+      { seq: 1, type: 'tool/result', time: 1786637429727, surface: 'current', text: readme },
+      { seq: 2, type: 'assistant/message', time: 1786637429727, surface: 'current', text: '## Summary\nIt is an MCP server.' },
+    ],
+  }
+  const { description } = renderTrajectory({ short: 'abc', title: 'T' }, trajectory).embeds[0].toJSON()
+
+  const ZWSP = '​'
+  for (const marker of ['# Blogger', '## Features', '- Get blog', '1. First', '> quoted']) {
+    const parts = description.split(marker)
+    assert.ok(parts.length > 1, `${marker} still appears verbatim`)
+    for (const before of parts.slice(0, -1)) {
+      assert.ok(before.endsWith(ZWSP), `${marker} must be defused, not left live at the start of a line`)
+    }
+  }
+
+  // The agent's own prose is written as markdown and is meant to render.
+  const summary = description.split('## Summary')
+  assert.ok(summary.length > 1, 'the assistant heading survives')
+  assert.ok(!summary[0].endsWith(ZWSP), 'an assistant heading is left alone')
+})
+
 test('empty results render as a message rather than an empty embed', () => {
   const workspace = { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [], synthetic: false }
   const empty = renderSessions(workspace, []).embeds[0].toJSON()
@@ -1167,6 +1197,49 @@ test('the menu refuses a switch the plugin row has not enabled', async () => {
     () => applyMenu({ interaction, ctx, config: { allowRun: false, categoryName: 'dsh', traceLimit: 25 }, workspace, t: translator('en') }),
     (error) => error.key === 'error.writeDisabled',
   )
+})
+
+test('a menu click is acknowledged rather than dropped on the floor', async () => {
+  // The card's own components are the only thing standing between a click and
+  // Discord's three-second window. A handler that throws before acknowledging
+  // — a missing import is enough — surfaces to the user as "did not respond in
+  // time" and leaves no trace on the card, so assert the acknowledgement
+  // itself, not the redraw that follows it.
+  const acked = []
+  const router = createRouter({
+    ctx: mockCtx({ sessionQuery }),
+    config: normalizeConfig({ guildId: '942602494134071356' }),
+    logger: { warn() {}, debug() {}, info() {} },
+    resync: async () => ({ mapping: new Map(), created: [], orphans: [], skipped: [], privacy: 'enforced' }),
+    mappedCount: () => 0,
+    runs: new Map(),
+    ownedAgents: new Set(),
+    activity: { running: () => false },
+  })
+
+  for (const customId of ['dsh:menu:refresh:-:-:sessions', 'dsh:menu:view:-:-:trace', 'dsh:menu:close:-:-:sessions']) {
+    const interaction = {
+      guildId: '942602494134071356',
+      guild: { ownerId: 'owner-1' },
+      user: { id: 'owner-1' },
+      locale: 'en-US',
+      customId,
+      values: [],
+      channel: { topic: '[dsh:ws-1] /work/alpha' },
+      isButton: () => true,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      isAutocomplete: () => false,
+      isChatInputCommand: () => false,
+      deferUpdate: async () => { acked.push(customId) },
+      editReply: async () => {},
+      followUp: async () => {},
+      reply: async () => { throw new Error(`${customId} was refused instead of acknowledged`) },
+    }
+    await router.handleInteraction(interaction)
+  }
+
+  assert.deepEqual(acked, ['dsh:menu:refresh:-:-:sessions', 'dsh:menu:view:-:-:trace', 'dsh:menu:close:-:-:sessions'])
 })
 
 test('preset and permission cards render inside embed limits', () => {
