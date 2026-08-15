@@ -428,6 +428,15 @@ steps, LLM and tool time, time to first token, decode rate, cache hit, and token
 dsh's own folded figures, the same ones the web chat's stats strip renders, so paging and compaction
 cannot change them.
 
+On a model with a published price the footer also carries a **cost estimate**, written as a range
+(`est. CN¥2.95–5.91`). The range is the honest form, not a hedge: DeepSeek's off-peak rate is exactly
+half its peak rate, and the token totals carry no time buckets, so a session spanning both halves of
+the day cannot collapse to one figure — the low end prices it as if it ran entirely off-peak, the
+high end as if entirely at peak, and the truth is somewhere between. An unrecognised model gets no
+estimate rather than last version's prices. `/dsh status` adds a field for **which period it is now
+and when that changes**, which answers the other question: whether starting something long right now
+costs double.
+
 ## Configuration
 
 | Key | Default | Meaning |
