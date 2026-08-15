@@ -170,7 +170,7 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 | `/dsh permission [to] [session]` | Show or switch permissions: the default for new sessions, or one running session. Switching needs `allowRun`. |
 | `/dsh workspace <path>` | Register a directory as a workspace and give it a channel (path is autocompleted). |
 | `/dsh status` | Mounted services, session counts, the workspace list, and how many channels are mapped. |
-| `/dsh sync` | Re-sync the category, its channels, and their privacy now. |
+| `/dsh sync` | Re-sync the category, its channels, and their privacy now — and file any session sitting in a registered workspace's directory that nothing had attached to it. |
 
 `trace` reads the harness's own semantic-document projection, so reasoning blocks, stream chunks,
 and structural boundaries are already filtered out. `everything: true` keeps the rest. Any answer
@@ -197,6 +197,13 @@ workspace never runs two agents at once. A live agent is used as-is, a cold one 
 the model selection and preset reinstalled, see below), and a workspace with no session yet gets a
 fresh one rooted at its directory. Each run also files the session under the workspace in dsh's
 registry, so it shows up in that workspace's channel instead of under "Ungrouped".
+
+Sessions started anywhere else are filed by `/dsh sync`, which attaches any session whose cwd is
+**exactly** a registered workspace's directory and that nothing had attached yet. The exactness
+matters: `/a/b` is a parent of `/a/b/sub`, so a looser match would file a subproject's sessions
+under its parent. Without this, dsh's own sidebar can show a workspace as empty while listing its
+sessions under "Ungrouped" — this bot reads through a cwd fallback and looks fine, so the two
+surfaces disagree about the same corpus.
 
 The turn is reported by rewriting one message every few seconds — Discord allows about five
 messages per five seconds per channel, and a busy turn emits hundreds of events. Reasoning blocks

@@ -19,7 +19,7 @@ import { answerQuestionModal, installQuestionProvider } from '../lib/questions.j
 import { installQuestionMirror } from '../lib/questions-mirror.js'
 import { actionButtons, decodeAction, isActionInteraction } from '../lib/actions.js'
 import { applyMenu, buildMenu, decodeMenu, encodeMenu, isMenuInteraction } from '../lib/menu.js'
-import { listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
+import { fileOrphanSessions, listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
 import { createRouter } from '../lib/router.js'
 import { LANGUAGES, commandText, fromDiscordLocale, translator } from '../lib/i18n.js'
 import {
@@ -1705,6 +1705,85 @@ const pick = (index) => ({
   guild: { ownerId: 'owner-1' },
   update: async () => {},
   reply: async () => {},
+})
+
+test('sync files stray sessions under the workspace they were opened in', async () => {
+  // `/dsh run` files what it starts; nothing filed what the web UI started, so
+  // dsh's own sidebar showed a registered workspace as empty while its sessions
+  // sat under "Ungrouped".
+  const attached = []
+  const workspace = (path, sessionIds) => ({
+    id: `ws-${path}`,
+    path,
+    title: path,
+    sessionIds,
+    attachSession: async (id) => { attached.push([path, id]) },
+  })
+
+  const ctx = mockCtx({
+    workspaceRegistry: { list: () => [workspace('/a/b', []), workspace('/a/b/sub', ['session-known'])] },
+    sessionQuery: {
+      listSessions: async () => [
+        { header: { id: 'session-stray', cwd: '/a/b' } },
+        { header: { id: 'session-known', cwd: '/a/b/sub' } },
+        { header: { id: 'session-child', cwd: '/a/b/sub' } },
+        { header: { id: 'session-elsewhere', cwd: '/a/b/other' } },
+        { header: { id: 'session-cwdless' } },
+      ],
+    },
+  })
+
+  const { filed } = await fileOrphanSessions(ctx, { warn() {} })
+
+  assert.equal(filed, 2)
+  // The trap: `/a/b` is a parent of `/a/b/sub`. A prefix match would file the
+  // subproject's sessions under the parent too — which is exactly the shape of
+  // `dsh` sitting above `dsh-discord-bot`.
+  assert.deepEqual(attached, [['/a/b', 'session-stray'], ['/a/b/sub', 'session-child']])
+  assert.ok(!attached.some(([, id]) => id === 'session-known'), 'an already-filed session is left alone')
+  assert.ok(!attached.some(([, id]) => id === 'session-elsewhere'), 'no workspace matches exactly, so it stays where it is')
+  assert.ok(!attached.some(([, id]) => id === 'session-cwdless'), 'a session with no cwd belongs to no directory')
+})
+
+test('one unfilable session does not abandon the rest, or the sync', async () => {
+  const attached = []
+  const warnings = []
+  const ctx = mockCtx({
+    workspaceRegistry: {
+      list: () => [{
+        id: 'ws-1',
+        path: '/a/b',
+        title: 'b',
+        sessionIds: [],
+        attachSession: async (id) => {
+          if (id === 'session-bad') throw new Error('registry write failed')
+          attached.push(id)
+        },
+      }],
+    },
+    sessionQuery: {
+      listSessions: async () => [
+        { header: { id: 'session-bad', cwd: '/a/b' } },
+        { header: { id: 'session-good', cwd: '/a/b' } },
+      ],
+    },
+  })
+
+  const { filed } = await fileOrphanSessions(ctx, { warn: (...args) => warnings.push(args.join(' ')) })
+
+  assert.equal(filed, 1)
+  assert.deepEqual(attached, ['session-good'], 'the loop continues past the failure')
+  assert.equal(warnings.length, 1, 'and says so, because Ungrouped is otherwise a symptom with no cause')
+})
+
+test('filing needs a registry to file into', async () => {
+  // The headless and tui profiles mount no registry; cwd grouping already
+  // answers the question this would be fixing.
+  const none = await fileOrphanSessions(mockCtx({ sessionQuery: { listSessions: async () => [] } }))
+  assert.deepEqual(none, { filed: 0 })
+
+  const empty = await fileOrphanSessions(mockCtx({ workspaceRegistry: { list: () => [] }, sessionQuery: { listSessions: async () => [{ header: { id: 's', cwd: '/a' } }] } }))
+  assert.deepEqual(empty, { filed: 0 })
 })
 
 test('losing the seam mirrors questions through the gateway instead of giving up', async () => {
