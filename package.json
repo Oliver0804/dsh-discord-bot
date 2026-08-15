@@ -1,7 +1,7 @@
 {
   "name": "dsh-discord-bot",
-  "version": "0.1.0",
-  "description": "Map dsh workspaces onto a Discord category — query session trajectories and live subagents from anywhere, with no inbound port.",
+  "version": "0.2.5",
+  "description": "Map dsh workspaces onto Discord — watch every session live, drive and steer agents, and reach the harness's own commands from anywhere, with no inbound port.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

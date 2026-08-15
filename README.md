@@ -29,7 +29,12 @@ Nothing listens. There is no inbound attack surface to add.
 
 **Reads** — sessions, trajectories, raw event timelines, subagents, lineage.
 
-**Writes** — register a workspace (`/dsh workspace`) and switch the default model (`/dsh model`).
+**Watches** — with `mirror: true`, every turn the harness runs appears in its workspace's channel as
+it happens, whoever started it: the web UI, the tui, a cron entry. Off by default, because it
+continuously exports session content to a chat platform.
+
+**Writes** — register a workspace (`/dsh workspace`), and switch the default model (`/dsh model`),
+the agent preset (`/dsh preset`) or the permission preset (`/dsh permission`).
 
 **Runs work** — `/dsh run <prompt>` delivers a prompt to the workspace's agent and streams the turn
 back. **This is off by default** (`allowRun: false`) because it is the one command that causes
@@ -135,13 +140,23 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 | Command | Answers |
 |---|---|
 | `/dsh help` | What you can do here, and how to start. |
+| `/dsh menu` | One card whose dropdowns do everything below, without typing. |
 | `/dsh sessions [limit]` | Sessions in this workspace: title, live or cold, age. |
+| `/dsh search <query> [limit]` | Full-text search across this workspace's sessions, ranked by the harness's own index. |
 | `/dsh trace [session] [limit] [everything]` | The trajectory — what was asked, answered, and which tools ran. |
 | `/dsh timeline [session] [limit]` | The raw event timeline plus a type histogram. |
 | `/dsh subagents [session] [deep]` | Subagents and whether each is **running** or inactive. |
 | `/dsh run <prompt>` | Send work to the workspace's agent and watch the turn. Needs `allowRun`. |
 | `/dsh lineage [session]` | Ancestor and descendant sessions. |
 | `/dsh model [to]` | Show the default model, or switch it (autocompleted from the provider catalog, falling back to the current model when the catalog is empty). |
+| `/dsh todos [session]` | The todo list a running session is working through. |
+| `/dsh context [session]` | The prompt sections, tools and skills that session actually has. |
+| `/dsh export [session]` | The whole trajectory as a Markdown attachment. |
+| `/dsh cmd [name] [input]` | List or run **this harness's own commands** — `/compact`, `/plan`, whatever the deployment registers. Running one needs `allowRun`. |
+| `/dsh stop [session]` | Interrupt the turn a session is running right now. Needs `allowRun`. |
+| `/dsh rewind [session]` | Continue from an earlier prompt, in a new session. Needs `allowRun`. |
+| `/dsh preset [to]` | Show or switch the agent preset new sessions are composed from. Switching needs `allowRun`. |
+| `/dsh permission [to] [session]` | Show or switch permissions: the default for new sessions, or one running session. Switching needs `allowRun`. |
 | `/dsh workspace <path>` | Register a directory as a workspace and give it a channel (path is autocompleted). |
 | `/dsh status` | Mounted services, session counts, the workspace list, and how many channels are mapped. |
 | `/dsh sync` | Re-sync the category, its channels, and their privacy now. |
@@ -176,6 +191,11 @@ The turn is reported by rewriting one message every few seconds — Discord allo
 messages per five seconds per channel, and a busy turn emits hundreds of events. Reasoning blocks
 are dropped from the live view; `/dsh trace` has the full record afterwards.
 
+That card carries buttons while it runs: **Trace** and **Subagents** answer privately with the same
+views the slash commands return, and **Stop** (only when `allowRun` is on) interrupts the turn from
+the card itself — no need to type `/dsh stop` while watching. The buttons are stateless, so a card
+left in scrollback still works after a restart.
+
 `runVerbosity` decides what that message says. The default, `minimal`, shows one line naming the
 tool in flight while it works, then the agent's closing words and a tool count when it lands — the
 answer, not the process. `full` keeps the running transcript for when you are watching *how* a turn
@@ -189,8 +209,9 @@ as prose and nothing executes them.
 When the harness asks for approval during such a turn, the bot posts a card with **Allow once** and
 **Deny**, and three rules govern it:
 
-- It answers **only** for turns started from Discord. A session you are driving in the web UI keeps
-  being answered there.
+- By default it answers **only** for turns started from Discord, so a session you are driving in the
+  web UI keeps being answered there. `mirrorApprovals: true` opts into the other posture — see
+  *Watching work you did not start*.
 - The clicker is checked against `allowedUserIds` — seeing the channel is not permission to approve.
 - If nobody answers within two minutes it hands the question back to dsh rather than deciding.
   Timing out is not consent, and it is not refusal either.
@@ -214,6 +235,122 @@ two fixes applies instead of retrying forever.
 Declined messages are ignored silently. This handler sees every message in the guild, so answering
 the ones it rejects would turn ordinary conversation into a stream of refusals — and telling an
 unauthorized member that they are unauthorized only advertises that the bot is worth probing.
+
+### Reaching the rest of the harness
+
+Six of the commands above exist because a harness is more than its session log,
+and most of what it can do is reachable without this package knowing what it is.
+
+**`/dsh cmd` is the escape hatch.** `dsh-commands` is where the harness and its
+plugins publish human commands, so listing the registry gives whatever this
+deployment actually has — `/compact`, `/plan`, `/goal`, and anything installed
+later — instead of a hard-coded set that goes stale. Execution goes through the
+registry's own executor, which writes the paired `command/run` and
+`command/done` records and resolves the handler through the agent's scope. That
+last part is what makes `/dsh cmd compact` work at all: the shipped presets
+isolate the compaction service inside their own realm, where `ctx.get(…)` from
+the host plane returns nothing. Anything this bot reads *about a session* now
+resolves the same way — the agent first, the host plane second.
+
+**Typing while it works steers instead of queueing.** If a turn is already
+running — started here, or at the machine — a new prompt is delivered at that
+turn's next step boundary rather than queued behind it as a whole new turn,
+which is what interrupting a conversation means. The reply says so and stops
+there: that turn belongs to whoever started it, and the mirror is already
+reporting it. Steering is still work, so it needs `allowRun` like everything
+else that reaches an agent — chat mode included.
+
+**`/dsh stop` is the kill switch.** A turn heading somewhere wrong can be
+interrupted from a phone, including one started at the machine. Queued and
+steering input goes with it, because a cancel that left the queue armed would
+restart the work it just stopped.
+
+**`/dsh rewind` forks without leaking.** Pick an earlier prompt from the menu
+and the conversation continues as a *new* session that stops just before it; the
+original is untouched. The seed is sliced from the live log rather than taken
+from `sessions.fork()` — that call creates a live child session in the store,
+and since `agents.create` must own the session it drives, using it would abandon
+one session per rewind.
+
+**Files dropped into a channel become context.** In chat mode, text attachments
+on a message are read and appended to the prompt they came with — the typed text
+stays first, which is what the transcript shows. Only the message's own Discord
+CDN attachments are fetched (never a URL from the text), only textual types, at
+most five files and 100 KB each.
+
+### Watching work you did not start
+
+Everything above is a pull: you ask, the bot reads. `mirror: true` adds the other direction. The
+plugin subscribes to the harness's own append feed — which reaches an unscoped listener for *every*
+session, not just the ones this bot created — and reports each turn into the channel its workspace
+maps to.
+
+The shape is the same one `/dsh run` uses, and deliberately so: **one message per turn, rewritten
+every few seconds** until the turn closes. Per-event posting cannot survive Discord's five-messages-
+per-five-seconds channel budget, and a card you can watch beats a wall you have to scroll. The card
+carries the same **Trace / Subagents / Stop** buttons as a driven run, so a turn started at the
+machine can still be inspected or interrupted from a phone.
+
+- A session is placed by the same union the commands read: the workspace's registry account, or its
+  cwd when the registry has not filed it yet.
+- **Subagents are excluded** unless `mirrorSubagents: true`. One turn can fan out to a dozen of them,
+  all sharing the parent's directory, and they would drown the channel they land in.
+- A turn this bot itself started is **not** mirrored — `runTurn` already reports it into the reply
+  that started it.
+- A turn whose workspace has no channel yet is **held**, not dropped, until `followNewWorkspaces`
+  reconciles one into existence (two minutes, then it is given up on).
+- **There is no backfill.** Events appended while the bot was offline are gone from the mirror's
+  point of view; `/dsh trace` still has them, because that reads the log rather than the feed.
+
+`mirrorApprovals: true` extends the approval card to sessions this bot did not start, which is what
+makes a phone enough to unblock work begun at the machine. The tradeoff is real and worth stating:
+while that card is pending, a person sitting at the web UI sees no prompt for up to two minutes —
+the answerer is a waterfall, and this bot has claimed the question. It stays off by default for that
+reason.
+
+The full two-way setup, with the caveats above accepted:
+
+```yaml
+config:
+  mirror: true            # harness → Discord: every turn, as it happens
+  mirrorApprovals: true   # approvals for sessions started anywhere
+  allowRun: true          # Discord → harness: /dsh run
+  listenToMessages: all   # Discord → harness: plain messages are prompts
+```
+
+### Answering the model's questions
+
+`ask_user_question` parks a tool call until a human answers. Unlike approvals,
+that seam takes **exactly one provider** and throws on the second — so
+`answerQuestions` is off by default and is not merely a try/catch: in a web
+profile `dsh-host-apiproxy` owns the seam and the person at the browser is the
+one watching for that questionnaire.
+
+The seam is claimed **after** the bot connects to Discord, never at activation,
+and that ordering is load-bearing rather than tidy: a plugin row in the patch
+layer is applied *before* the bundles it sits after, so claiming it at
+activation makes `dsh-host-apiproxy` fail its own registration and **the whole
+harness refuses to boot**. Waiting until the gateway is up puts this bot last in
+line — wherever a UI owns the seam it has already taken it and this one declines.
+
+With it on, each question arrives as a card with a menu, gated by the same
+allowlist. Two limits worth knowing: a question with no options cannot be
+answered here at all (Discord has no free-text prompt outside a modal opened
+from an interaction), and an unanswered card **rejects** the ask after fifteen
+minutes — there is no `next()` to hand it back with, and a tool call blocked
+forever is worse than one that was cancelled.
+
+### The menu card
+
+`/dsh menu` posts one card that covers the command surface without typing — which matters on the
+machine this bot exists to be used from. Five rows: what to look at, which session, which setting to
+change, that setting's options, and refresh/close.
+
+The card holds **no server-side state**. The view, the selected session and the open picker are
+encoded into its own components' ids and read back on the next click, so a card posted yesterday
+still works after a restart — the message *is* the state. Reading is open to anyone on the
+allowlist; the preset and permission pickers are disabled unless `allowRun` is set, because those
+two decide what a later turn may do.
 
 ### Language
 
@@ -245,6 +382,11 @@ cannot change them.
 | `listenToMessages` | `off` | `off` / `mention` / `all` — treat channel messages as prompts. Needs `allowRun` and the Message Content intent. |
 | `runVerbosity` | `minimal` | `minimal` shows the answer; `full` streams the whole transcript. |
 | `language` | `auto` | `auto` / `en` / `zh-Hant` / `zh-Hans` — the language replies are written in. |
+| `mirror` | `false` | Post every turn the harness runs into its workspace's channel, whoever started it. **Exports session content continuously.** |
+| `mirrorSubagents` | `false` | Include subagent sessions in the mirror. One turn can fan out to a dozen. |
+| `mirrorNewSessions` | `true` | Announce a newly created session in its channel. Only applies while `mirror` is on. |
+| `mirrorApprovals` | `false` | Answer approval questions for sessions this bot did not start. **A web-side user then waits out the card's two minutes.** |
+| `answerQuestions` | `false` | Claim the `ask_user_question` seam and answer it with Discord menus. **Single-provider: a profile whose UI already owns it declines, and claiming it first would break that UI.** |
 | `followNewWorkspaces` | `true` | Create a channel when a session appears for an unmapped workspace. |
 | `traceLimit` | `25` | Default entries per `/dsh trace` — also the default per `/dsh timeline`. |
 | `sessionLimit` | `15` | Default sessions per `/dsh sessions`. |
@@ -267,6 +409,17 @@ The token may also come from `DSH_DISCORD_BOT_TOKEN` or `DISCORD_BOT_TOKEN`. Pre
   warning at the top.
 - **Approval is never automatic.** The bot cannot approve on your behalf, and a card that times out
   is handed back to dsh rather than decided.
+- **Mirroring is opt-in.** With `mirror` off — the default — nothing reaches a channel unless
+  someone asks for it. With it on, every session's conversation is continuously exported to Discord,
+  including work started at the machine by someone who never chose that.
+- **`/dsh cmd`, `/dsh stop` and `/dsh rewind` need `allowRun`.** Each one either
+  causes work, ends work someone at the machine may be watching, or mints an
+  agent — none of them are reads, and none are available with `allowRun` off.
+- **Attachments are read from Discord's CDN only**, never from a URL in the
+  message text, only for textual types, and capped at five files of 100 KB.
+- **Switching preset or permission needs `allowRun`.** Neither runs anything itself, but both decide
+  what a later turn may do — which tools it is composed with, and whether its commands are sandboxed
+  or approved — so widening them is gated like execution, not like a read.
 
 ### Where the token lives
 
@@ -349,11 +502,18 @@ Layout:
 | `lib/index.js` | Cordis plugin entry: lifecycle, connection, retry, logging |
 | `lib/config.js` | Config validation and token resolution |
 | `lib/workspaces.js` | Workspace view — registry, or cwd grouping as fallback |
-| `lib/queries.js` | Every harness read and the two writes |
+| `lib/queries.js` | Every harness read, and the four writes |
 | `lib/render.js` | Discord embeds, size limits, attachment overflow |
 | `lib/topology.js` | Category/channel reconciliation and privacy |
 | `lib/commands.js` | Slash command definitions |
 | `lib/router.js` | Interaction routing, authorization, autocomplete |
+| `lib/mirror.js` | The push side: buffering, one message per turn, the call budget |
+| `lib/activity.js` | Who is working right now, from `agent/status` |
+| `lib/scope.js` | Reading services that live inside an agent's preset realm |
+| `lib/questions.js` | The `ask_user_question` provider, when this bot claims it |
+| `lib/attachments.js` | Channel files, read into prompt content blocks |
+| `lib/routing.js` | Session → workspace → channel, cached, shared with approvals |
+| `lib/menu.js` | The `/dsh menu` card and its stateless components |
 | `bin/setup.js` | Installer |
 
 To test against a live harness without touching your own profile, install the packed tarball and

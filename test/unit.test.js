@@ -8,23 +8,46 @@ import { isAuthorized, normalizeConfig, resolveToken } from '../lib/config.js'
 import { PermissionFlagsBits } from 'discord.js'
 
 import { channelSlug, deniesEveryone, workspaceIdFromTopic } from '../lib/topology.js'
-import { displayEntry, resolveAgent, userMessage } from '../lib/run.js'
+import { displayEntry, preferRunning, renderTurnBody, resolveAgent, rewindBoundary, rewindPoints, rewindSession, userMessage } from '../lib/run.js'
 import { installApprovalAnswerer } from '../lib/approval.js'
+import { createChannelResolver } from '../lib/routing.js'
+import { createMirror } from '../lib/mirror.js'
+import { createActivityTracker } from '../lib/activity.js'
+import { assembleContextFor, serviceForAgent } from '../lib/scope.js'
+import { readAttachments } from '../lib/attachments.js'
+import { installQuestionProvider } from '../lib/questions.js'
+import { actionButtons, decodeAction, isActionInteraction } from '../lib/actions.js'
+import { applyMenu, buildMenu, decodeMenu, encodeMenu, isMenuInteraction } from '../lib/menu.js'
 import { listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
 import { LANGUAGES, commandText, fromDiscordLocale, translator } from '../lib/i18n.js'
 import {
+  cancelSession,
   createWorkspace,
+  exportSession,
+  listHarnessCommands,
   listSubagents,
   listWorkspaceSessions,
+  readAgentContext,
+  readAgentPresets,
   readModelSelection,
+  readPermissionPresets,
+  readTodos,
   readTrajectory,
+  runHarnessCommand,
+  searchWorkspaceSessions,
   shortId,
+  switchAgentPreset,
   switchModel,
+  switchPermissionPreset,
 } from '../lib/queries.js'
 import {
   renderError,
   renderModel,
   renderModelSwitched,
+  renderPermissions,
+  renderPermissionSwitched,
+  renderPresets,
+  renderPresetSwitched,
   renderSessions,
   renderHelp,
   renderSubagents,
@@ -364,6 +387,71 @@ test('the title-less listing opens no logs — the autocomplete deadline path', 
 
   await listWorkspaceSessions(ctx, workspace, 10)
   assert.equal(titleCalls, 1, 'the default still folds titles')
+})
+
+test('full-text search asks the harness for this workspace only and keeps its ranking', async () => {
+  const calls = []
+  const search = {
+    ...sessionQuery,
+    searchSessions: async (request) => {
+      calls.push(request)
+      return { items: [
+        {
+          header: { id: 'session-bbbb2222-0000-0000-0000-000000000000', cwd: '/work/alpha', createdAt: '2026-08-13T00:00:00.000Z' },
+          live: false,
+          persisted: true,
+          bestMatch: { seq: 42, type: 'assistant/message', time: 1786637432204, snippet: 'the harness answer lives here' },
+        },
+        {
+          header: { id: 'session-aaaa1111-0000-0000-0000-000000000000', cwd: '/work/alpha', createdAt: '2026-08-14T00:00:00.000Z' },
+          live: true,
+          persisted: true,
+          bestMatch: { seq: 7, type: 'user/message', time: 1786637429727, snippet: 'research the harness' },
+        },
+      ] }
+    },
+  }
+  const ctx = mockCtx({ sessionQuery: search })
+  const workspace = { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [], synthetic: false }
+
+  const results = await searchWorkspaceSessions(ctx, workspace, 'harness', { limit: 10 })
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].sessionFilters, [{ kind: 'cwd', values: ['/work/alpha'] }], 'the search is scoped to the channel\'s workspace')
+  assert.equal(calls[0].query, 'harness')
+  assert.equal(calls[0].limit, 10)
+  assert.equal(results.total, 2)
+  assert.deepEqual(results.hits.map((hit) => hit.short), ['bbbb2222', 'aaaa1111'], 'harness ranking is preserved, not re-sorted by age')
+  assert.equal(results.hits[0].snippet, 'the harness answer lives here')
+  assert.equal(results.hits[0].type, 'assistant/message')
+})
+
+test('full-text search refuses an empty query and a backend without search', async () => {
+  const ctx = mockCtx({ sessionQuery })
+  const workspace = { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [], synthetic: false }
+
+  await assert.rejects(() => searchWorkspaceSessions(ctx, workspace, '   '), /give me something to search for/)
+  await assert.rejects(
+    () => searchWorkspaceSessions(mockCtx({ sessionQuery: { listSessions: async () => [] } }), workspace, 'x'),
+    /no full-text search backend/,
+  )
+})
+
+test('running-card buttons carry the session and gate stop on allowRun', () => {
+  const t = (key) => ({ 'action.trace': 'Trace', 'action.subagents': 'Subagents', 'action.stop': 'Stop' })[key]
+  const readOnly = actionButtons('abcd1234', { allowRun: false, t })
+  const ids = readOnly.components.map((button) => button.data.custom_id)
+  assert.deepEqual(ids, ['dsh:act:abcd1234:trace', 'dsh:act:abcd1234:subagents'])
+  assert.equal(readOnly.components.length, 2, 'no stop button when allowRun is off')
+
+  const withStop = actionButtons('abcd1234', { allowRun: true, t })
+  assert.equal(withStop.components.length, 3)
+  assert.equal(withStop.components[2].data.custom_id, 'dsh:act:abcd1234:stop')
+  assert.equal(withStop.components[2].data.style, 4, 'stop is a danger button')
+
+  assert.equal(isActionInteraction({ customId: 'dsh:act:abcd1234:trace' }), true)
+  assert.equal(isActionInteraction({ customId: 'dsh:menu:view' }), false)
+  assert.deepEqual(decodeAction('dsh:act:abcd1234:stop'), { short: 'abcd1234', action: 'stop' })
 })
 
 test('a trajectory keeps narrative events and takes the tail', async () => {
@@ -782,4 +870,828 @@ test('empty results render as a message rather than an empty embed', () => {
 
   const failed = renderError(new Error('SESSION_QUERY_CORRUPT_SESSION')).embeds[0].toJSON()
   assert.ok(failed.description.includes('SESSION_QUERY_CORRUPT_SESSION'))
+})
+
+// ---------------------------------------------------------------------------
+// Pushing the other way: the mirror, its channel resolver, and the menu card.
+// ---------------------------------------------------------------------------
+
+/** A Discord channel that records what was sent to it. */
+const mockChannel = () => {
+  const sent = []
+  const edits = []
+  const message = { edit: async (payload) => { edits.push(payload); return message } }
+  return {
+    sent,
+    edits,
+    channel: { id: 'chan-1', isTextBased: () => true, send: async (payload) => { sent.push(payload); return message } },
+  }
+}
+
+/** Config with every mirror knob at its documented default, plus overrides. */
+const mirrorConfig = (overrides = {}) => ({
+  language: 'en',
+  runVerbosity: 'minimal',
+  mirror: true,
+  mirrorSubagents: false,
+  mirrorNewSessions: false,
+  mirrorApprovals: false,
+  ...overrides,
+})
+
+const assistantEvent = (text) => ({ type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text }] } } })
+
+test('a turn started outside Discord becomes one message, then one edit', async () => {
+  const { sent, edits, channel } = mockChannel()
+  const mirror = createMirror({
+    ctx: { on: () => () => {} },
+    config: mirrorConfig(),
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs: new Map(),
+    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+  })
+
+  const session = { id: 'session-web-1' }
+  mirror.observe(session, { type: 'turn/start', data: { turn: 1 } })
+  mirror.observe(session, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'what changed?' }] } })
+  mirror.observe(session, assistantEvent('reading the diff'))
+
+  await mirror.flush()
+  assert.equal(sent.length, 1, 'the turn opens exactly one message')
+  assert.equal(edits.length, 0)
+  const opened = sent[0].embeds[0].toJSON()
+  assert.ok(opened.description.includes('what changed?'), 'the prompt heads the card')
+
+  // A second pass with nothing new must not spend an API call.
+  await mirror.flush()
+  assert.equal(sent.length, 1)
+  assert.equal(edits.length, 0)
+
+  mirror.observe(session, assistantEvent('the diff touches two files'))
+  mirror.observe(session, { type: 'turn/end', data: { turn: 1, reason: 'idle' } })
+  await mirror.flush()
+
+  assert.equal(sent.length, 1, 'the same message is rewritten, not replaced')
+  assert.equal(edits.length, 1)
+  assert.ok(edits[0].embeds[0].toJSON().description.includes('two files'))
+  assert.equal(mirror.peek('session-web-1'), undefined, 'a closed turn is forgotten')
+})
+
+test('the mirror stays out of the way of runs Discord itself started', async () => {
+  const { sent, channel } = mockChannel()
+  const runs = new Map([['session-ours', { channelId: 'chan-1' }]])
+  const mirror = createMirror({
+    ctx: { on: () => () => {} },
+    config: mirrorConfig(),
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs,
+    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+  })
+
+  mirror.observe({ id: 'session-ours' }, assistantEvent('driven from Discord'))
+  await mirror.flush()
+
+  assert.equal(mirror.peek('session-ours'), undefined, 'nothing is buffered for a driven run')
+  assert.equal(sent.length, 0, 'runTurn already reports this turn into its own reply')
+})
+
+test('subagent chatter is held back unless it was asked for', async () => {
+  const { sent, channel } = mockChannel()
+  const build = (config) => createMirror({
+    ctx: { on: () => () => {} },
+    config,
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs: new Map(),
+    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: true, title: 'Alpha' }), forget() {} },
+  })
+
+  const quiet = build(mirrorConfig())
+  quiet.observe({ id: 'session-child' }, assistantEvent('a subagent thinking out loud'))
+  await quiet.flush()
+  assert.equal(sent.length, 0, 'one workspace can run dozens of these at once')
+
+  const loud = build(mirrorConfig({ mirrorSubagents: true }))
+  loud.observe({ id: 'session-child' }, assistantEvent('a subagent thinking out loud'))
+  await loud.flush()
+  assert.equal(sent.length, 1)
+})
+
+test('the resolver places a session by account, then by cwd', async () => {
+  const registry = {
+    list: () => [
+      { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: ['session-aaaa1111-0000-0000-0000-000000000000'] },
+      { id: 'ws-2', title: 'Beta', path: '/work/beta', sessionIds: [] },
+    ],
+  }
+  const ctx = mockCtx({ workspaceRegistry: registry, sessionQuery })
+  const resolver = createChannelResolver({ ctx })
+  resolver.update(new Map([['chan-1', 'ws-1'], ['chan-2', 'ws-2']]))
+
+  const accounted = await resolver.locate('session-aaaa1111-0000-0000-0000-000000000000')
+  assert.equal(accounted.channelId, 'chan-1')
+  assert.equal(accounted.isChild, false)
+
+  // Filed nowhere, but its cwd is Beta's directory — the same union the command
+  // surface reads, so a session started outside the GUI is still placed.
+  const byCwd = await resolver.locate('session-cccc3333-0000-0000-0000-000000000000')
+  assert.equal(byCwd.channelId, 'chan-2')
+
+  const child = await resolver.locate('session-bbbb2222-0000-0000-0000-000000000000')
+  assert.equal(child.isChild, true, 'a subagent is recognizable without loading it')
+
+  const homeless = await resolver.locate('session-dddd4444-0000-0000-0000-000000000000')
+  assert.equal(homeless.channelId, undefined, 'a session with no cwd belongs to no channel')
+
+  // A channel created after the miss must be picked up, not cached away.
+  resolver.update(new Map([['chan-9', 'ws-9']]))
+  const registryGrew = { list: () => [{ id: 'ws-9', title: 'Gamma', path: '/work/alpha', sessionIds: ['session-dddd4444-0000-0000-0000-000000000000'] }] }
+  const grown = createChannelResolver({ ctx: mockCtx({ workspaceRegistry: registryGrew, sessionQuery }) })
+  grown.update(new Map([['chan-9', 'ws-9']]))
+  assert.equal((await grown.locate('session-dddd4444-0000-0000-0000-000000000000')).channelId, 'chan-9')
+})
+
+test('an injected user message is not reported as something a person said', () => {
+  const typed = displayEntry({ type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] } })
+  assert.deepEqual(typed, { label: '👤', text: 'do the thing' })
+
+  const injected = displayEntry({ type: 'user/message', data: { source: { kind: 'inject' }, content: [{ type: 'text', text: 'AGENTS.md changed' }] } })
+  assert.equal(injected, undefined, 'file-change notices are the harness talking to itself')
+})
+
+test('the turn renderer answers the question in minimal and shows work in full', () => {
+  const entries = [
+    { label: '👤', text: 'why is it slow?' },
+    { label: '🔧', text: 'bash rg -n slow' },
+    { label: '🤖', text: 'the loop reopens the log each pass' },
+  ]
+
+  const minimal = renderTurnBody(entries, { verbosity: 'minimal', status: 'done', done: true })
+  assert.ok(minimal.includes('the loop reopens the log each pass'))
+  assert.ok(!minimal.includes('rg -n slow'), 'the tool trail is noise once there is an answer')
+
+  const full = renderTurnBody(entries, { verbosity: 'full', status: 'running', done: false })
+  assert.ok(full.includes('rg -n slow'), 'full is for watching how, not what')
+})
+
+test('switching the agent preset reads the write back and refuses a broken one', async () => {
+  let current = 'minimal'
+  const presets = {
+    get defaultId() { return current },
+    list: async () => [
+      { id: 'standard', name: 'Standard', trust: 'shipped' },
+      { id: 'minimal', name: 'Minimal', trust: 'shipped' },
+      { id: 'ghost', name: 'Ghost', trust: 'user', broken: 'no rows' },
+    ],
+  }
+  const written = []
+  const settings = { update: async (ns, patch) => { written.push([ns, patch]); current = patch.default } }
+  const ctx = mockCtx({ agentPresets: presets, settings })
+
+  const change = await switchAgentPreset(ctx, 'standard')
+  assert.deepEqual([change.before, change.after], ['minimal', 'standard'])
+  assert.deepEqual(written, [['agent-presets', { default: 'standard' }]])
+
+  await assert.rejects(() => switchAgentPreset(ctx, 'ghost'), (error) => error.key === 'error.brokenPreset')
+  await assert.rejects(() => switchAgentPreset(ctx, 'nope'), (error) => error.key === 'error.noSuchPreset')
+
+  // No settings provider means the write is a silent no-op upstream; saying it
+  // worked would leave every later session on a preset nobody chose.
+  const stuck = mockCtx({ agentPresets: presets })
+  await assert.rejects(() => switchAgentPreset(stuck, 'minimal'), (error) => error.key === 'error.presetNotSaved')
+
+  const roster = await readAgentPresets(ctx)
+  assert.equal(roster.current, 'standard')
+  assert.equal(roster.presets.length, 3, 'a broken preset stays visible so it can be found and removed')
+})
+
+test('permissions switch either the default or one running session', async () => {
+  let fallback = 'workspace-write'
+  const permissions = {
+    names: ['workspace-write', 'danger-full-access'],
+    get defaultPreset() { return fallback },
+    current: (events) => events.filter((event) => event.type === 'permission/preset').at(-1)?.data.preset ?? 'workspace-write',
+    optionOf: (name) => ({ name, description: `${name} bundle` }),
+    resolve: (name) => ({ sandbox: name, approval: name === 'danger-full-access' ? 'never' : 'ask' }),
+    set: (session, name) => session.events.push({ type: 'permission/preset', data: { preset: name } }),
+  }
+  const live = { session: { id: 'session-live', events: [] } }
+  const agents = { get: (id) => (id === 'session-live' ? live : undefined) }
+  const settings = { update: async (ns, patch) => { if (ns === 'permission') fallback = patch.defaultPreset } }
+  const ctx = mockCtx({ permissionPresets: permissions, agents, settings })
+
+  const forSession = await switchPermissionPreset(ctx, 'danger-full-access', 'session-live')
+  assert.equal(forSession.scope, 'session')
+  assert.equal(forSession.after, 'danger-full-access')
+  assert.equal(fallback, 'workspace-write', 'a session switch must not move the default with it')
+
+  const forDefault = await switchPermissionPreset(ctx, 'danger-full-access')
+  assert.deepEqual([forDefault.scope, forDefault.before, forDefault.after], ['default', 'workspace-write', 'danger-full-access'])
+
+  await assert.rejects(() => switchPermissionPreset(ctx, 'workspace-write', 'session-cold'), (error) => error.key === 'error.sessionNotLive')
+  await assert.rejects(() => switchPermissionPreset(ctx, 'wide-open'), (error) => error.key === 'error.noSuchPermission')
+
+  const state = await readPermissionPresets(ctx, 'session-live')
+  assert.equal(state.session.current, 'danger-full-access')
+  assert.equal(state.options.length, 2)
+})
+
+test('the menu card carries its whole state in its own component ids', async () => {
+  const state = { session: 'ab12cd34', setting: 'preset', view: 'trace' }
+  const decoded = decodeMenu(encodeMenu('view', state))
+  assert.equal(decoded.kind, 'view')
+  assert.deepEqual(decoded.state, state)
+
+  // A fresh card has no session and no picker open; the defaults must survive
+  // the round trip rather than becoming the string "undefined".
+  const blank = decodeMenu(encodeMenu('refresh', {}))
+  assert.deepEqual(blank.state, { session: undefined, setting: undefined, view: 'sessions' })
+
+  assert.equal(isMenuInteraction({ customId: 'dsh:menu:view:-:-:sessions' }), true)
+  assert.equal(isMenuInteraction({ customId: 'dsh-approve' }), false, 'approval buttons are collected elsewhere')
+})
+
+test('the menu fits inside Discord component limits', async () => {
+  const workspace = { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [], synthetic: false }
+  const ctx = mockCtx({
+    sessionQuery,
+    agentPresets: { defaultId: 'minimal', list: async () => [{ id: 'minimal', name: 'Minimal' }] },
+  })
+  const t = translator('zh-Hant')
+
+  const card = await buildMenu({ ctx, config: { categoryName: 'dsh', traceLimit: 25, allowRun: false }, workspace, state: { view: 'sessions', setting: 'preset' }, t })
+
+  assert.ok(card.components.length <= 5, 'Discord allows five rows per message')
+  for (const row of card.components) {
+    const json = row.toJSON()
+    for (const component of json.components) {
+      assert.ok(component.custom_id.length <= 100, 'component ids are bounded')
+      assert.ok((component.options ?? []).length <= 25, 'selects are within the option ceiling')
+      for (const option of component.options ?? []) {
+        assert.ok(option.label.length > 0 && option.label.length <= 100)
+        assert.ok((option.description ?? '').length <= 100)
+      }
+    }
+  }
+
+  // Reading is ungated; applying a preset from the card is the same decision
+  // `/dsh preset` gates on, so the picker is disabled rather than absent.
+  const picker = card.components[3].toJSON().components[0]
+  assert.equal(picker.disabled, true)
+})
+
+test('the menu refuses a switch the plugin row has not enabled', async () => {
+  const workspace = { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [], synthetic: false }
+  const ctx = mockCtx({ sessionQuery })
+  const interaction = { customId: encodeMenu('apply-preset', { view: 'sessions' }), values: ['standard'] }
+
+  await assert.rejects(
+    () => applyMenu({ interaction, ctx, config: { allowRun: false, categoryName: 'dsh', traceLimit: 25 }, workspace, t: translator('en') }),
+    (error) => error.key === 'error.writeDisabled',
+  )
+})
+
+test('preset and permission cards render inside embed limits', () => {
+  const presets = renderPresets({
+    current: 'minimal',
+    presets: [
+      { id: 'standard', name: 'Standard', description: 'x'.repeat(300) },
+      { id: 'minimal', name: 'Minimal' },
+      { id: 'ghost', name: 'Ghost', broken: 'y'.repeat(300) },
+    ],
+  }, translator('zh-Hant')).embeds[0].toJSON()
+  assert.ok(presets.fields[0].value.length <= 1024)
+  assert.ok(presets.description.includes('minimal'))
+
+  const permissions = renderPermissions({
+    default: 'workspace-write',
+    options: [
+      { id: 'workspace-write', name: 'workspace-write', sandbox: 'workspace-write', approval: 'ask' },
+      { id: 'danger-full-access', name: 'danger-full-access', sandbox: 'danger-full-access', approval: 'never' },
+    ],
+    session: { id: 'session-live', short: 'live1234', current: 'danger-full-access' },
+  }, translator('zh-Hans')).embeds[0].toJSON()
+  assert.ok(permissions.description.includes('live1234'))
+  assert.ok(permissions.fields[0].value.length <= 1024)
+
+  const switched = renderPermissionSwitched({ scope: 'session', short: 'live1234', before: 'workspace-write', after: 'danger-full-access' }).embeds[0].toJSON()
+  assert.equal(switched.color, 0xfaa61a, 'widening permissions is warned about, not celebrated')
+
+  const presetSwitched = renderPresetSwitched({ before: 'minimal', after: 'standard' }).embeds[0].toJSON()
+  assert.ok(presetSwitched.description.includes('standard'))
+})
+
+test('a turn whose workspace has no channel yet is held, not dropped', async () => {
+  const { sent, channel } = mockChannel()
+  let channelId
+  const mirror = createMirror({
+    ctx: { on: () => () => {} },
+    config: mirrorConfig(),
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs: new Map(),
+    resolver: { locate: async () => ({ channelId, isChild: false, title: 'Alpha' }), forget() {} },
+  })
+
+  const session = { id: 'session-new-workspace' }
+  mirror.observe(session, assistantEvent('working before the channel exists'))
+  mirror.observe(session, { type: 'turn/end', data: { turn: 1, reason: 'idle' } })
+
+  await mirror.flush()
+  assert.equal(sent.length, 0, 'there is nowhere to post yet')
+  assert.ok(mirror.peek('session-new-workspace') !== undefined, 'the turn is still buffered')
+
+  // `followNewWorkspaces` reconciles a channel into existence moments later.
+  channelId = 'chan-1'
+  await mirror.flush()
+  assert.equal(sent.length, 1, 'the held turn lands once its channel appears')
+  assert.ok(sent[0].embeds[0].toJSON().description.includes('working before the channel exists'))
+})
+
+test('a long turn cannot buffer the transcript of everything it read', async () => {
+  const { sent, channel } = mockChannel()
+  const mirror = createMirror({
+    ctx: { on: () => () => {} },
+    config: mirrorConfig(),
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs: new Map(),
+    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+  })
+
+  const session = { id: 'session-long' }
+  mirror.observe(session, { type: 'turn/start', data: { turn: 1 } })
+  mirror.observe(session, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'audit the repo' }] } })
+
+  // 500 tool results of a megabyte each: what reading a large codebase looks
+  // like on the append feed, and what no renderer will ever show.
+  for (let i = 0; i < 500; i += 1) {
+    mirror.observe(session, { type: 'tool/call', data: { name: 'read', arguments: `{"file":"f${i}"}` } })
+    mirror.observe(session, { type: 'tool/result', data: { message: { content: [{ content: [{ type: 'text', text: 'x'.repeat(1_000_000) }] }] } } })
+  }
+
+  const state = mirror.peek('session-long')
+  assert.ok(state.entries.length <= 200, `buffered ${state.entries.length} entries`)
+  const buffered = state.entries.reduce((total, entry) => total + entry.text.length, 0)
+  assert.ok(buffered <= 200 * 3000, `buffered ${buffered} characters of a 500 MB turn`)
+  assert.equal(state.entries[0].label, '👤', 'the prompt survives the pruning that drops the middle')
+
+  mirror.observe(session, { type: 'turn/end', data: { turn: 1, reason: 'idle' } })
+  await mirror.flush()
+
+  // The count is carried separately, so pruning the buffer cannot make the
+  // card understate what the turn did.
+  assert.ok(sent[0].embeds[0].toJSON().description.includes('500'), 'every tool call is still counted')
+})
+
+test('a filtered subagent does not block announcements for real sessions', async () => {
+  const { sent, channel } = mockChannel()
+  const mirror = createMirror({
+    ctx: { on: () => () => {} },
+    config: mirrorConfig({ mirrorNewSessions: true }),
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs: new Map(),
+    resolver: {
+      locate: async (id) => (id.startsWith('session-child')
+        ? { channelId: 'chan-1', isChild: true, title: 'Alpha' }
+        : { channelId: 'chan-1', isChild: false, title: 'Alpha' }),
+      forget() {},
+    },
+  })
+
+  // A fan-out of children, then the session someone actually started.
+  for (let i = 0; i < 10; i += 1) mirror.note({ id: `session-child-${i}` })
+  mirror.note({ id: 'session-root' })
+
+  await mirror.flush()
+  await mirror.flush()
+
+  assert.equal(sent.length, 1, 'only the root session is announced')
+  assert.equal(mirror.pending(), 0, 'children leave the queue instead of occupying it for two minutes')
+})
+
+test('mirroring is off until someone turns it on', () => {
+  const base = { guildId: '123456789012345678' }
+  const defaults = normalizeConfig(base)
+
+  // Exporting every session's conversation to a chat platform is a decision an
+  // operator makes, never a default they discover.
+  assert.equal(defaults.mirror, false)
+  assert.equal(defaults.mirrorApprovals, false, 'answering for a session started elsewhere is a separate decision again')
+  assert.equal(defaults.mirrorSubagents, false)
+  assert.equal(defaults.mirrorNewSessions, true, 'once mirroring is on, a new session announcing itself is the cheap part')
+
+  const on = normalizeConfig({ ...base, mirror: true, mirrorSubagents: true, mirrorApprovals: true })
+  assert.equal(on.mirror, true)
+  assert.equal(on.mirrorSubagents, true)
+  assert.equal(on.mirrorApprovals, true)
+
+  assert.throws(() => normalizeConfig({ ...base, mirror: 'yes' }), /`mirror` must be true or false/)
+  assert.throws(() => normalizeConfig({ ...base, mirrorApprovals: 1 }), /`mirrorApprovals` must be true or false/)
+})
+
+// ---------------------------------------------------------------------------
+// What the TUI taught us: preset realms, live status, the command registry,
+// steering, stopping, rewinding, and files dropped into a channel.
+// ---------------------------------------------------------------------------
+
+test('a preset-realm service is found through the agent, not the root', async () => {
+  const hostSkills = { id: 'host' }
+  const presetCompaction = { id: 'preset' }
+  const agent = { id: 'session-1' }
+
+  const ctx = mockCtx({
+    skills: hostSkills,
+    agentPresets: {
+      serviceFor: (subject, name) => (subject === agent && name === 'compaction' ? presetCompaction : undefined),
+    },
+  })
+
+  // The shipped presets isolate `compaction`: it exists, and the root context
+  // cannot see it. Reading it any other way reports "no compaction service".
+  assert.equal(ctx.get('compaction'), undefined)
+  assert.equal(serviceForAgent(ctx, agent, 'compaction'), presetCompaction)
+
+  // A host-plane service still answers, with or without an agent.
+  assert.equal(serviceForAgent(ctx, agent, 'skills'), hostSkills)
+  assert.equal(serviceForAgent(ctx, undefined, 'skills'), hostSkills)
+
+  // A roster that throws on the lookup must not take the caller down with it.
+  const hostile = mockCtx({
+    skills: hostSkills,
+    agentPresets: { serviceFor: () => { throw new Error('not my agent') } },
+  })
+  assert.equal(serviceForAgent(hostile, agent, 'skills'), hostSkills)
+
+  // Prompt assembly without `scope` silently omits the agent's own sections
+  // and tools, so both fields are load-bearing.
+  assert.deepEqual(assembleContextFor(agent), { agent, scope: agent })
+})
+
+test('the activity tracker follows the status feed and forgets disposed agents', () => {
+  const tracker = createActivityTracker({ ctx: { on: () => () => {} } })
+
+  tracker.observe({ agent: { id: 'session-a' }, status: 'running' })
+  tracker.observe({ agent: { id: 'session-b' }, status: 'idle' })
+  assert.equal(tracker.isRunning('session-a'), true)
+  assert.equal(tracker.isRunning('session-b'), false)
+  assert.equal(tracker.runningCount(), 1)
+
+  tracker.observe({ agent: { id: 'session-a' }, status: 'idle' })
+  assert.equal(tracker.runningCount(), 0)
+
+  // Disposal is not a third status — a remembered `idle` would count a session
+  // that no longer exists.
+  tracker.observe({ agent: { id: 'session-b' } })
+  assert.equal(tracker.statusOf('session-b'), undefined)
+})
+
+test('a mirrored turn shows how far through its todo list it is', async () => {
+  const { sent, channel } = mockChannel()
+  const activity = createActivityTracker({ ctx: { on: () => () => {} } })
+  activity.observe({ agent: { id: 'session-todo' }, status: 'running' })
+
+  const mirror = createMirror({
+    ctx: { on: () => () => {} },
+    config: mirrorConfig(),
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs: new Map(),
+    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+    activity,
+  })
+
+  const session = { id: 'session-todo' }
+  mirror.observe(session, { type: 'turn/start', data: { turn: 1 } })
+  mirror.observe(session, assistantEvent('starting'))
+  mirror.observe(session, {
+    type: 'todo/write',
+    data: {
+      todos: [
+        { content: 'read the router', status: 'completed' },
+        { content: 'write the bridge', status: 'in_progress' },
+        { content: 'test it', status: 'pending' },
+      ],
+    },
+  })
+
+  await mirror.flush()
+  const description = sent[0].embeds[0].toJSON().description
+  assert.ok(description.includes('1/3'), 'progress is visible without opening anything')
+  assert.ok(description.includes('write the bridge'), 'so is the step in flight')
+
+  // `todo/write` must not join the narrative vocabulary — that set is what
+  // `/dsh trace` renders, and a todo snapshot is not a trajectory entry.
+  assert.equal(displayEntry({ type: 'todo/write', data: { todos: [] } }), undefined)
+})
+
+test('harness commands are listed from the registry and run through it', async () => {
+  const agent = { id: 'session-live' }
+  const lines = []
+  const registry = {
+    list: (subject) => (subject === agent
+      ? [
+          { name: 'compact', description: 'Compact the conversation' },
+          { name: 'plan', description: 'Toggle plan mode', input: { hint: 'on|off' } },
+        ]
+      : []),
+    execute: async (subject, line) => {
+      lines.push(line)
+      if (line.startsWith('/nope')) return undefined
+      return { commandId: 'c1', result: { kind: 'success', text: `ran ${line}` } }
+    },
+  }
+  const ctx = mockCtx({ commands: registry })
+
+  const listed = listHarnessCommands(ctx, agent)
+  assert.deepEqual(listed.map((command) => command.name), ['compact', 'plan'])
+  assert.equal(listed[1].hint, 'on|off', 'the input hint reaches the picker')
+
+  // The registry resolves the handler through the agent's own scope, which is
+  // how `/compact` reaches a compaction service isolated inside its preset.
+  const ran = await runHarnessCommand(ctx, agent, 'plan', 'off')
+  assert.deepEqual([ran.name, ran.ok, ran.text], ['plan', true, 'ran /plan off'])
+  assert.deepEqual(lines, ['/plan off'])
+
+  await assert.rejects(() => runHarnessCommand(ctx, agent, 'nope'), (error) => error.key === 'error.noSuchCommand')
+  assert.deepEqual(listHarnessCommands(mockCtx({}), agent), [], 'a profile without the registry has no commands, not an error')
+})
+
+test('todos and interrupts need a live session, and say so when there is none', () => {
+  const events = [
+    { seq: 1, type: 'todo/write', data: { todos: [{ content: 'first', status: 'completed' }] } },
+    { seq: 2, type: 'todo/write', data: { todos: [{ content: 'first', status: 'completed' }, { content: 'second', status: 'pending' }] } },
+  ]
+  let cancelled
+  const agent = {
+    id: 'session-live',
+    status: 'running',
+    session: { id: 'session-live', events },
+    inbox: { hasPending: true },
+    cancel: (cause) => { cancelled = cause },
+  }
+  const ctx = mockCtx({ agents: { get: (id) => (id === 'session-live' ? agent : undefined) } })
+
+  // The latest whole-list write wins; earlier ones are not merged.
+  assert.deepEqual(readTodos(ctx, 'session-live').map((todo) => todo.content), ['first', 'second'])
+  assert.equal(readTodos(ctx, 'session-cold'), undefined, 'a cold session cannot answer — its payloads are not in the metadata listing')
+
+  const stopped = cancelSession(ctx, 'session-live')
+  assert.deepEqual(cancelled, { kind: 'user' }, 'the harness\'s own cause for a human interrupt')
+  assert.deepEqual([stopped.wasRunning, stopped.hadPending], [true, true])
+
+  assert.throws(() => cancelSession(ctx, 'session-cold'), (error) => error.key === 'error.sessionNotLive')
+})
+
+test('a rewind slices its own seed and leaves no forked session behind', async () => {
+  // seq 0..7: two complete turns. The rewind target is the second prompt.
+  const events = [
+    { seq: 0, type: 'turn/start', data: { turn: 1 } },
+    { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'first ask' }] } },
+    { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'first answer' }] } } },
+    { seq: 3, type: 'turn/end', data: { turn: 1, reason: 'completed' } },
+    { seq: 4, type: 'turn/start', data: { turn: 2 } },
+    { seq: 5, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'second ask' }] } },
+    { seq: 6, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'second answer' }] } } },
+    { seq: 7, type: 'turn/end', data: { turn: 2, reason: 'completed' } },
+  ]
+
+  const agent = {
+    id: 'session-source',
+    status: 'idle',
+    options: { provider: 'deepseek-official', model: 'deepseek-v4' },
+    session: { id: 'session-source', events, header: { agentPreset: 'standard' } },
+  }
+
+  assert.deepEqual(rewindPoints(agent).map((point) => [point.seq, point.text]), [[1, 'first ask'], [5, 'second ask']])
+  // The chosen message's own seq sits inside its turn; the boundary is the last
+  // event before that turn opened, so the seed ends on a completed turn.
+  assert.equal(rewindBoundary(agent, 5), 3)
+  assert.equal(rewindBoundary(agent, 1), -1, 'nothing precedes the first turn')
+
+  let created
+  let forked = 0
+  const owned = new Map()
+  const ctx = mockCtx({
+    agents: {
+      get: () => undefined,
+      create: async (options) => {
+        created = options
+        return { agent: { session: { id: 'session-child' } }, dispose: async () => {} }
+      },
+    },
+    // `sessions.fork()` creates a LIVE child in the store that nobody would own
+    // — this path must never call it.
+    sessions: { fork: () => { forked += 1; return { events: [] } } },
+    agentPresets: { mount: async () => {} },
+  })
+
+  const result = await rewindSession({ ctx, agent, seq: 5, workspace: { id: 'ws', path: '/work/alpha', synthetic: true }, owned })
+
+  assert.equal(forked, 0, 'the seed is sliced here; forking would leak a session')
+  assert.equal(created.seed.length, 4, 'the first complete turn, and nothing of the second')
+  assert.equal(created.seed.at(-1).type, 'turn/end', 'a seed may not end inside an open turn')
+  assert.deepEqual(created.meta.parentSession, 'session-source')
+  assert.equal(created.meta.agentPreset, 'standard', 'a rewind continues under the composition it was produced with')
+  assert.deepEqual(created.agentOptions, { provider: 'deepseek-official', model: 'deepseek-v4' })
+  assert.deepEqual([result.kept, result.dropped], [4, 4])
+  assert.equal(owned.size, 1, 'the new handle is owned, so disposal releases it')
+
+  await assert.rejects(
+    () => rewindSession({ ctx, agent: { ...agent, status: 'running' }, seq: 5, workspace: { path: '/w' }, owned }),
+    (error) => error.key === 'error.rewindRunning',
+  )
+})
+
+test('the context read goes through the agent, or it reports the wrong catalog', async () => {
+  let assembledWith
+  const agent = { id: 'session-live', session: { id: 'session-live' } }
+  const ctx = mockCtx({
+    agents: { get: (id) => (id === 'session-live' ? agent : undefined) },
+    agentPresets: {
+      serviceFor: (subject, name) => (subject === agent && name === 'skills'
+        ? { list: async () => [{ name: 'research' }, { name: 'commit' }] }
+        : undefined),
+    },
+    systemPrompt: {
+      assemble: async (context) => {
+        assembledWith = context
+        return { sections: [{ name: 'persona' }], tools: [{ name: 'bash', description: 'run a command' }] }
+      },
+    },
+  })
+
+  const context = await readAgentContext(ctx, 'session-live')
+  assert.deepEqual(assembledWith, { agent, scope: agent }, 'without `scope` the agent\'s own sections and tools vanish')
+  assert.deepEqual(context.sections, ['persona'])
+  assert.deepEqual(context.tools.map((tool) => tool.name), ['bash'])
+  assert.deepEqual(context.skills.map((skill) => skill.name), ['research', 'commit'])
+
+  await assert.rejects(() => readAgentContext(ctx, 'session-cold'), (error) => error.key === 'error.sessionNotLive')
+})
+
+test('an export carries the whole trajectory, not the message-sized view', async () => {
+  const exported = await exportSession(mockCtx({ sessionQuery }), 'session-aaaa1111-0000-0000-0000-000000000000')
+  assert.ok(exported.markdown.startsWith('# session aaaa1111'))
+  assert.ok(exported.markdown.includes('research the harness'))
+  assert.ok(exported.markdown.includes('session/title'), 'everything means everything, including log-only entries')
+  assert.equal(exported.entries, 4)
+})
+
+test('attachments become context blocks, filtered by type and size', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async (url) => ({ ok: true, text: async () => `contents of ${url}` })
+
+  try {
+    const message = {
+      attachments: {
+        size: 4,
+        values: () => [
+          { name: 'notes.md', size: 200, contentType: 'text/markdown', url: 'https://cdn.discordapp.com/notes.md' },
+          { name: 'screenshot.png', size: 900, contentType: 'image/png', url: 'https://cdn.discordapp.com/shot.png' },
+          { name: 'huge.log', size: 5_000_000, contentType: 'text/plain', url: 'https://cdn.discordapp.com/huge.log' },
+          // Discord serves many text files as octet-stream; the name decides.
+          { name: 'patch.diff', size: 400, contentType: 'application/octet-stream', url: 'https://cdn.discordapp.com/patch.diff' },
+        ].values(),
+      },
+    }
+
+    const { blocks, read, skipped } = await readAttachments(message)
+    assert.deepEqual(read, ['notes.md', 'patch.diff'])
+    assert.deepEqual(skipped, ['screenshot.png', 'huge.log'], 'a binary decoded as text is noise that costs tokens')
+    assert.equal(blocks.length, 2)
+    assert.ok(blocks[0].text.startsWith('<attachment name="notes.md">'))
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a prompt keeps its own words first when files come with it', () => {
+  const message = userMessage('look at this', [{ type: 'text', text: '<attachment name="a.md">…</attachment>' }])
+  assert.equal(message.content.length, 2)
+  assert.equal(message.content[0].text, 'look at this', 'the transcript renders what the person said, not the file dump')
+  assert.ok(Object.isFrozen(message.content[1]))
+})
+
+test('the questions provider declines a seam someone else owns', () => {
+  const warnings = []
+  const logger = { warn: (...args) => warnings.push(args.join(' ')), info() {} }
+
+  // A web profile's apiproxy registers first; the person is watching the
+  // browser, and taking the questionnaire away from them would be wrong.
+  const taken = installQuestionProvider({
+    ctx: mockCtx({ userQuestions: { registerProvider: () => { throw new Error('a user-questions provider is already registered') } } }),
+    config: { language: 'en', allowedUserIds: [] },
+    logger,
+    client: () => undefined,
+    resolver: { locate: async () => ({}) },
+    runs: new Map(),
+  })
+  assert.equal(taken, undefined)
+  assert.equal(warnings.length, 1)
+
+  let registered
+  const free = installQuestionProvider({
+    ctx: mockCtx({ userQuestions: { registerProvider: (provider) => { registered = provider; return () => {} } } }),
+    config: { language: 'en', allowedUserIds: [] },
+    logger,
+    client: () => undefined,
+    resolver: { locate: async () => ({}) },
+    runs: new Map(),
+  })
+  assert.equal(typeof free, 'function', 'a profile with a free seam gets a provider')
+  assert.equal(typeof registered.ask, 'function')
+
+  // No channel means no way to ask; the ask must reject rather than hang,
+  // because a single-provider seam has nobody to hand the question back to.
+  return assert.rejects(
+    () => registered.ask({ questions: [{ id: 'q', question: 'which?' }], agent: { session: { id: 'session-x' } } }),
+    (error) => error.code === 'ASK_CANCELLED',
+  )
+})
+
+test('a prompt reaches the agent that is actually working', () => {
+  const activity = createActivityTracker({ ctx: { on: () => () => {} } })
+  activity.observe({ agent: { id: 'session-busy' }, status: 'running' })
+  activity.observe({ agent: { id: 'session-idle' }, status: 'idle' })
+
+  // Newest-first, and the newest is the idle one — which is exactly the case
+  // that would steer into the wrong agent and leave the running turn alone.
+  const sessions = [{ id: 'session-idle' }, { id: 'session-busy' }, { id: 'session-cold' }]
+  assert.deepEqual(preferRunning(sessions, activity).map((entry) => entry.id), ['session-busy', 'session-idle', 'session-cold'])
+
+  // Nothing running, or no tracker at all: the caller's own order stands.
+  const quiet = createActivityTracker({ ctx: { on: () => () => {} } })
+  assert.deepEqual(preferRunning(sessions, quiet), sessions)
+  assert.deepEqual(preferRunning(sessions, undefined), sessions)
+})
+
+test('a log that does not start at seq 0 refuses to rewind, in words', async () => {
+  const events = [
+    { seq: 40, type: 'turn/start', data: { turn: 5 } },
+    { seq: 41, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'ask' }] } },
+    { seq: 42, type: 'turn/end', data: { turn: 5, reason: 'completed' } },
+  ]
+  const agent = { id: 's', status: 'idle', options: {}, session: { id: 'session-imported', events, header: {} } }
+
+  await assert.rejects(
+    () => rewindSession({ ctx: mockCtx({ agents: { create: async () => ({ agent: { session: { id: 'x' } } }) } }), agent, seq: 41, workspace: { path: '/w' }, owned: new Map() }),
+    (error) => error.key === 'error.cannotRewind',
+  )
+})
+
+test('the questions seam is never claimed during activation', async () => {
+  // Learned the hard way on a live boot: a plugin row in the patch layer is
+  // applied BEFORE the bundles it sits after, so claiming the single-provider
+  // user-questions seam at activation makes dsh-host-apiproxy fail its own
+  // registration — and the whole harness refuses to start. The claim has to
+  // wait until this bot is connected, by which point every UI has had its turn.
+  const { plugin } = await import('../lib/index.js')
+
+  let claimed = 0
+  let disposer
+  const ctx = {
+    get: (name) => (name === 'userQuestions' ? { registerProvider: () => { claimed += 1; return () => {} } } : undefined),
+    on: () => () => {},
+    effect: (effect) => { disposer = effect() },
+    logger: undefined,
+  }
+
+  // A token must be present, or activation stops before reaching any install
+  // code at all and this would pass against the very placement it guards.
+  plugin.apply(ctx, { guildId: '123456789012345678', token: 'not-a-real-token', answerQuestions: true })
+
+  // Synchronous on purpose: the claim that broke the boot ran inside `start()`,
+  // before anything awaited, so it would already have happened by this line.
+  assert.equal(claimed, 0, 'activation must leave the seam alone; onReady claims it')
+
+  // Releases the login retry timer and the half-connected client.
+  await disposer?.()
+})
+
+test('a resumed session is not announced as a new one', async () => {
+  const { sent, channel } = mockChannel()
+  const mirror = createMirror({
+    ctx: { on: () => () => {} },
+    config: mirrorConfig({ mirrorNewSessions: true }),
+    logger: { warn() {}, debug() {} },
+    client: () => ({ channels: { fetch: async () => channel } }),
+    runs: new Map(),
+    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+  })
+
+  // Restarting the harness re-enters every persisted session, which is the
+  // same `session/created` edge a brand-new one produces. Seen live: three
+  // "new session" cards per restart, for sessions days old.
+  mirror.note({ id: 'session-resumed', events: [{ seq: 0, type: 'turn/start' }] })
+  mirror.note({ id: 'session-fresh', events: [] })
+  mirror.note({ id: 'session-unknown' })
+
+  await mirror.flush()
+
+  assert.equal(sent.length, 2, 'the fresh one and the shapeless one; never the resumed one')
+  assert.equal(mirror.pending(), 0)
 })

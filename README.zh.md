@@ -27,7 +27,12 @@ DDNS、不用反向代理，也不用把機器的鑰匙交給任何穿透服務*
 
 **讀取** —— 工作階段、軌跡、原始事件時間軸、子代理、血緣關係。
 
-**寫入** —— 註冊工作區（`/dsh workspace`）、切換預設模型（`/dsh model`）。
+**自動推播** —— 開啟 `mirror: true` 之後，harness 上**任何地方**發起的 turn（web UI、tui、
+排程）都會即時出現在它所屬工作區的頻道裡。**預設關閉**，因為它等於把工作階段內容持續匯出到
+一個聊天平台。
+
+**寫入** —— 註冊工作區（`/dsh workspace`）、切換預設模型（`/dsh model`）、
+Agent 預設（`/dsh preset`）、權限模式（`/dsh permission`）。
 
 **執行工作** —— `/dsh run <prompt>` 把 prompt 送給該工作區的代理，並即時回傳整個 turn。
 **預設關閉**（`allowRun: false`），因為這是唯一一個「在你機器上產生實際動作」而非描述現況的指令。
@@ -127,13 +132,23 @@ pnpm add dsh-discord-bot
 | 指令 | 回答什麼 |
 |---|---|
 | `/dsh help` | 你可以在這裡做什麼，以及怎麼開始。 |
+| `/dsh menu` | 開一張卡片，用下拉選單完成以下所有操作，不必再打字。 |
 | `/dsh sessions [limit]` | 這個工作區的工作階段：標題、是否運行中、時間。 |
+| `/dsh search <query> [limit]` | 以全文搜尋這個工作區的工作階段，按 harness 自己的索引排序。 |
 | `/dsh trace [session] [limit] [everything]` | 軌跡 —— 問了什麼、回答什麼、跑了哪些工具。 |
 | `/dsh timeline [session] [limit]` | 原始事件時間軸與型別統計。 |
 | `/dsh subagents [session] [deep]` | 子代理清單，以及每個是**運行中**還是已結束。 |
 | `/dsh run <prompt>` | 把工作送給該工作區的代理並即時觀看。需要 `allowRun`。 |
 | `/dsh lineage [session]` | 上游與下游的工作階段關係。 |
 | `/dsh model [to]` | 顯示或切換預設模型（選項由 provider 目錄自動完成；目錄為空時退回目前模型）。 |
+| `/dsh todos [session]` | 執行中工作階段正在跑的待辦清單。 |
+| `/dsh context [session]` | 那個工作階段實際擁有的提示區段、工具與技能。 |
+| `/dsh export [session]` | 完整軌跡，輸出成 Markdown 附件。 |
+| `/dsh cmd [name] [input]` | 列出或執行 **harness 自己的指令** —— `/compact`、`/plan`，以及這個部署註冊的任何指令。執行需要 `allowRun`。 |
+| `/dsh stop [session]` | 中斷某個工作階段現在正在跑的 turn。需要 `allowRun`。 |
+| `/dsh rewind [session]` | 從較早的提示接續，開成新的工作階段。需要 `allowRun`。 |
+| `/dsh preset [to]` | 顯示或切換新工作階段使用的 Agent 預設。切換需要 `allowRun`。 |
+| `/dsh permission [to] [session]` | 顯示或切換權限：新工作階段的預設值，或某個執行中的工作階段。切換需要 `allowRun`。 |
 | `/dsh workspace <path>` | 把一個目錄註冊成工作區並建立頻道（路徑有自動完成）。 |
 | `/dsh status` | 已掛載的服務、工作階段數量、工作區清單與已對應的頻道數。 |
 | `/dsh sync` | 立即重新同步類別、頻道與其私密設定。 |
@@ -163,6 +178,10 @@ preset，見下），而**還沒有任何工作階段的工作區會直接建一
 Turn 的回報方式是**每隔幾秒改寫同一則訊息**：Discord 大約限制每個頻道 5 則訊息 / 5 秒，
 而一個忙碌的 turn 會產生數百個事件。即時視圖會濾掉推理區塊，完整紀錄之後用 `/dsh trace` 看。
 
+執行中的卡片會帶按鈕：**軌跡**與**子代理**會以私訊方式回覆與 slash 指令相同的內容，
+**中斷**（只有在 `allowRun` 開啟時出現）可以直接在卡片上打斷這個 turn——不必邊看邊打
+`/dsh stop`。按鈕是無狀態的，留在捲動紀錄裡的卡片重啟後仍然有效。
+
 `runVerbosity` 決定那則訊息的內容。預設 `minimal`：執行中只顯示一行「正在跑哪個工具」，
 結束時給出代理的最終回答與工具呼叫次數 —— **只給答案，不給過程**。`full` 則保留完整即時
 逐條紀錄，適合你想看它「怎麼做」而不是「做出什麼」的時候。
@@ -174,7 +193,8 @@ schema，於是把工具呼叫當成純文字寫出來，而沒有任何東西�
 當 harness 在這種 turn 中要求授權時，bot 會發一張含 **Allow once** / **Deny** 按鈕的卡片，
 並遵守三條規則：
 
-- **只回答從 Discord 發起的 turn**。你在 web UI 操作的工作階段仍然由 web UI 回答。
+- **預設只回答從 Discord 發起的 turn**，你在 web UI 操作的工作階段仍然由 web UI 回答。
+  `mirrorApprovals: true` 可以改成另一種姿態 —— 見*看見不是你發起的工作*。
 - 按下按鈕的人會用 `allowedUserIds` 檢查 —— 看得到頻道不等於有權批准。
 - 兩分鐘內沒人回答，就把問題交還給 dsh，而不是自己決定。**逾時不是同意，也不是拒絕。**
 
@@ -195,6 +215,98 @@ Discord 會直接拒絕整條連線**，所以 bot 只在這個設定開啟時�
 
 被拒絕的訊息一律**靜默忽略**：這個 handler 會看到伺服器裡的每一則訊息，逐一回覆拒絕會把正常
 對話變成一串拒絕訊息 —— 而且告訴未授權的人「你沒有權限」，等於告訴他這個 bot 值得試探。
+
+### 觸及 harness 的其餘部分
+
+上面有六個指令的存在，是因為 harness 不只是它的工作階段紀錄；而它能做的大部分事情，
+這個套件其實不需要知道那是什麼就能接上。
+
+**`/dsh cmd` 是那個逃生口。** `dsh-commands` 是 harness 與其 plugin 發布人類指令的地方，
+所以「列出註冊表」拿到的就是這個部署**實際擁有**的東西 —— `/compact`、`/plan`、`/goal`，
+以及之後才安裝的任何指令 —— 而不是一份會過期的硬編清單。執行走註冊表自己的 executor，
+它會寫入成對的 `command/run` 與 `command/done` 紀錄，並**沿著 agent 的 scope 解析 handler**。
+最後這點正是 `/dsh cmd compact` 能運作的原因：shipped preset 把 compaction 服務關在自己的
+isolate realm 裡，從 host plane 用 `ctx.get(…)` 什麼都拿不到。現在這個 bot 所有「關於某個
+工作階段」的讀取都照同一條路徑解析 —— 先問 agent，再問 host plane。
+
+**它在跑的時候打字，是插話而不是排隊。** 如果 turn 已經在跑 —— 不論從這裡還是從機器上發起 ——
+新的提示會在那個 turn 的**下一個 step 邊界**送達，而不是排成另一個完整的 turn。這才是
+「打斷一段對話」的意思。回覆會說明並就此停住：那個 turn 屬於發起它的人，而鏡射已經在報告它了。
+插話一樣是在造成工作，所以跟其他觸及代理的功能一樣需要 `allowRun` —— 聊天模式也不例外。
+
+**`/dsh stop` 是斷路器。** 跑歪的 turn 可以從手機中斷，包含在機器上發起的。排隊中與插話的
+輸入會一併丟棄 —— 中斷後還留著待送佇列，等於把剛剛停下來的工作又叫起來。
+
+**`/dsh rewind` 會 fork，但不洩漏。** 從選單挑一個較早的提示，對話會以**新的工作階段**
+繼續，停在那個提示之前；原本的完全不動。seed 是從 live log 自己切出來的，而不是用
+`sessions.fork()` —— 那個呼叫會在 store 裡建立一個 live 子工作階段，而 `agents.create`
+必須擁有自己驅動的工作階段，所以用它等於每次回溯都丟下一個沒人管的工作階段。
+
+**丟進頻道的檔案會變成上下文。** 聊天模式下，訊息附帶的文字檔會被讀取並附加到同一則提示 ——
+打字的內容仍然排在第一，那才是逐字稿會顯示的東西。只抓訊息自己的 Discord CDN 附件
+（絕不抓訊息文字裡的 URL）、只讀文字型別、最多 5 個檔案、每個上限 100 KB。
+
+### 看見不是你發起的工作
+
+前面所有東西都是「你問才查」。`mirror: true` 補上另一個方向：plugin 訂閱 harness 自己的
+append feed —— 未 scoped 的 listener 會收到**每一個** session 的事件，不只是這個 bot 建立的 ——
+再把每個 turn 報進它所屬工作區的頻道。
+
+形式和 `/dsh run` 完全一樣，而且是刻意的：**一個 turn 一則訊息，每隔幾秒改寫**，直到 turn 結束。
+逐事件發訊息撐不過 Discord「每頻道 5 則 / 5 秒」的限制，而且一張可以盯著看的卡片，也勝過一整面
+要往上捲的牆。卡片同樣帶 **軌跡 / 子代理 / 中斷** 按鈕，所以在機器端開始的 turn，也能在手機上
+查看或打斷。
+
+- 工作階段的歸屬用的是跟指令一樣的聯集：工作區的 registry 帳戶，或 registry 還沒登記時的 cwd。
+- **子代理預設不推**（除非 `mirrorSubagents: true`）。一個 turn 可以展開出十幾個子代理，
+  而且它們共用父代理的目錄，全推會直接把頻道淹掉。
+- 這個 bot 自己發起的 turn **不會**重複推播 —— `runTurn` 已經把它報進發起它的那則回覆。
+- 工作區還沒有頻道時，該 turn 會被**留著**而不是丟掉，直到 `followNewWorkspaces` 把頻道同步出來
+  （最多留兩分鐘）。
+- **沒有離線補送。** Bot 離線期間追加的事件，從推播的角度就是遺失了；`/dsh trace` 仍然讀得到，
+  因為它讀的是 log 而不是事件流。
+
+`mirrorApprovals: true` 會把授權卡片擴大到**不是**這個 bot 發起的工作階段 —— 這正是「人在外面，
+用手機就能解開機器上卡住的工作」所需要的。代價很實在，必須講清楚：卡片還在等的時候，
+坐在 web UI 前面的人最多有兩分鐘看不到那個提示 —— answerer 是 waterfall，而問題已經被這個 bot
+接走了。預設關閉就是因為這一點。
+
+完整的雙向設定（代表你接受上面所有取捨）：
+
+```yaml
+config:
+  mirror: true            # harness → Discord：每個 turn 即時推播
+  mirrorApprovals: true   # 任何地方發起的工作階段，授權都送到 Discord
+  allowRun: true          # Discord → harness：/dsh run
+  listenToMessages: all   # Discord → harness：直接打字就是派工
+```
+
+### 回答模型提出的問題
+
+`ask_user_question` 會把一個工具呼叫**停在那裡**，等人回答。跟授權不同的是，那個接縫
+**只接受一個 provider**，註冊第二個會直接拋錯 —— 所以 `answerQuestions` 預設關閉，
+而且這不只是包個 try/catch：在 web profile 裡，`dsh-host-apiproxy` 擁有那個接縫，
+而坐在瀏覽器前面的人才是正在等那份問卷的人。
+
+這個接縫是在 **bot 連上 Discord 之後**才接管的，絕不在啟動階段 —— 這個順序是必要的，不是講究：
+patch 層的 plugin 列會**比它後面那些 bundle 更早**套用，所以在啟動階段接管會讓
+`dsh-host-apiproxy` 自己的註冊失敗，**整個 harness 直接開不起來**。等到 gateway 起來才接管，
+就把這個 bot 排到最後 —— 只要有任何 UI 擁有那個接縫，它早就拿走了，而這個 bot 會退讓。
+
+開啟之後，每道問題會以一張帶選單的卡片送達，並受同一份允許名單保護。有兩個限制要知道：
+沒有選項的開放式問題在這裡**無法回答**（Discord 沒有 modal 以外的自由文字提示），
+而沒人回答的卡片會在十五分鐘後**拒絕**這次詢問 —— 這裡沒有 `next()` 可以把問題交回去，
+而一個永遠卡住的工具呼叫，比一個被取消的更糟。
+
+### 卡片選單
+
+`/dsh menu` 會發一張卡片，把整個指令表面變成不用打字的操作 —— 這在手機上很重要，而手機正是這個
+bot 存在的理由。五排：要看什麼、選哪個工作階段、要改哪個設定、那個設定的選項、重新整理／關閉。
+
+這張卡片**沒有任何伺服器端狀態**：目前的檢視、選中的工作階段、開著的設定選單，全部編碼在它自己
+元件的 id 裡，下次點擊時再讀回來。所以昨天發的卡片在重啟之後照樣能用 —— **訊息本身就是狀態**。
+讀取對允許名單上的所有人開放；Agent 預設與權限這兩個選單則在沒有 `allowRun` 時是停用狀態，
+因為它們決定的是之後的 turn 被允許做什麼。
 
 ### 語言
 
@@ -223,6 +335,11 @@ LLM 與工具耗時、首字時間、解碼速率、快取命中、token 數。�
 | `listenToMessages` | `off` | `off` / `mention` / `all` —— 把頻道訊息當成 prompt。需要 `allowRun` 與 Message Content intent。 |
 | `runVerbosity` | `minimal` | `minimal` 只給答案；`full` 串流完整過程。 |
 | `language` | `auto` | `auto` / `en` / `zh-Hant` / `zh-Hans` —— 回覆使用的語言。 |
+| `mirror` | `false` | 把 harness 跑的每個 turn 推進它所屬工作區的頻道，不論由誰發起。**等於持續匯出工作階段內容。** |
+| `mirrorSubagents` | `false` | 推播是否包含子代理工作階段。一個 turn 可以展開出十幾個。 |
+| `mirrorNewSessions` | `true` | 新工作階段建立時在頻道公告一則。只在 `mirror` 開啟時有作用。 |
+| `mirrorApprovals` | `false` | 連不是這個 bot 發起的工作階段，授權問題也送到 Discord。**web 端的人得等這張卡片的兩分鐘。** |
+| `answerQuestions` | `false` | 接管 `ask_user_question` 接縫，用 Discord 選單回答。**單一 provider：已經被自家 UI 佔用的 profile 會安靜退讓，而搶先佔用則會弄壞那個 UI。** |
 | `followNewWorkspaces` | `true` | 出現未對應工作區的新工作階段時自動建立頻道。 |
 | `traceLimit` | `25` | `/dsh trace` 預設筆數 —— 也是 `/dsh timeline` 的預設筆數。 |
 | `sessionLimit` | `15` | `/dsh sessions` 預設筆數。 |
@@ -242,6 +359,15 @@ Token 也可以來自環境變數 `DSH_DISCORD_BOT_TOKEN` 或 `DISCORD_BOT_TOKEN
 - **沒開就無法執行**：`allowRun` 預設關閉；關閉時沒有任何指令能跑命令或驅動代理。開啟後，
   允許名單就等於 shell 存取名單 —— 見文件開頭的警告。
 - **授權永遠不會自動發生**：bot 無法代替你批准，逾時的卡片會交還給 dsh 而非自行決定。
+- **自動推播是選擇加入的**：`mirror` 預設關閉時，沒有人問就沒有任何東西進到頻道。一旦開啟，
+  每個工作階段的對話都會持續匯出到 Discord —— 包含別人在這台機器上開始、而他從未選擇這件事的工作。
+- **`/dsh cmd`、`/dsh stop`、`/dsh rewind` 都需要 `allowRun`**：三者分別是「造成工作」、
+  「終止別人可能正在看的工作」、「產生一個新代理」，沒有一個是讀取，`allowRun` 關閉時一律不可用。
+- **附件只從 Discord CDN 讀取**，不會去抓訊息文字裡的 URL，只讀文字型別，最多 5 個檔案、
+  每個 100 KB。
+- **切換 preset 或 permission 需要 `allowRun`**：這兩者本身不執行任何東西，但它們決定之後的 turn
+  被允許做什麼 —— 用哪些工具組成、指令是否進 sandbox 或需要批准 —— 所以放寬它們的關卡等同執行，
+  而不是等同讀取。
 
 ### Token 放在哪裡
 
@@ -314,11 +440,18 @@ npm test          # 42 個單元測試 —— 不需網路、不需 harness、�
 | `lib/index.js` | Cordis plugin 進入點：生命週期、連線、重試、日誌 |
 | `lib/config.js` | 設定驗證與 token 解析 |
 | `lib/workspaces.js` | 工作區視圖 —— registry，或退回 cwd 分組 |
-| `lib/queries.js` | 所有 harness 讀取與兩個寫入 |
+| `lib/queries.js` | 所有 harness 讀取與四個寫入 |
 | `lib/render.js` | Discord embed、長度限制、附件溢出 |
 | `lib/topology.js` | 類別／頻道同步與私密設定 |
 | `lib/commands.js` | Slash 指令定義 |
 | `lib/router.js` | 互動路由、授權、自動完成 |
+| `lib/mirror.js` | 推播端：緩衝、一個 turn 一則訊息、呼叫額度 |
+| `lib/activity.js` | 誰正在工作，來自 `agent/status` |
+| `lib/scope.js` | 讀取關在 agent preset realm 裡的服務 |
+| `lib/questions.js` | `ask_user_question` provider（本 bot 接管時） |
+| `lib/attachments.js` | 頻道檔案，讀成提示的 content block |
+| `lib/routing.js` | 工作階段 → 工作區 → 頻道的解析與快取，與授權卡片共用 |
+| `lib/menu.js` | `/dsh menu` 卡片與它的無狀態元件 |
 | `bin/setup.js` | 安裝器 |
 
 要在不動到自己 profile 的情況下測試真實 harness：安裝打包後的 tarball，
