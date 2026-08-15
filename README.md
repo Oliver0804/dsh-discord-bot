@@ -191,10 +191,12 @@ The turn is reported by rewriting one message every few seconds — Discord allo
 messages per five seconds per channel, and a busy turn emits hundreds of events. Reasoning blocks
 are dropped from the live view; `/dsh trace` has the full record afterwards.
 
-That card carries buttons while it runs: **Trace** and **Subagents** answer privately with the same
-views the slash commands return, and **Stop** (only when `allowRun` is on) interrupts the turn from
-the card itself — no need to type `/dsh stop` while watching. The buttons are stateless, so a card
-left in scrollback still works after a restart.
+That card carries buttons while it runs: **Trace**, **Timeline**, **Subagents**, **Todos** and
+**Export** answer privately with the same views the slash commands return. With `allowRun` on a
+second row adds **Steer** — a modal that delivers a message at the turn's next step boundary — and
+**Stop**, which is two-step: the first tap arms Confirm/Cancel so a phone in a pocket cannot
+interrupt work by accident. The buttons are stateless, so a card left in scrollback still works
+after a restart.
 
 `runVerbosity` decides what that message says. The default, `minimal`, shows one line naming the
 tool in flight while it works, then the agent's closing words and a tool count when it lands — the
@@ -288,8 +290,8 @@ maps to.
 The shape is the same one `/dsh run` uses, and deliberately so: **one message per turn, rewritten
 every few seconds** until the turn closes. Per-event posting cannot survive Discord's five-messages-
 per-five-seconds channel budget, and a card you can watch beats a wall you have to scroll. The card
-carries the same **Trace / Subagents / Stop** buttons as a driven run, so a turn started at the
-machine can still be inspected or interrupted from a phone.
+carries the same read buttons as a driven run, plus **Steer** and two-step **Stop** when `allowRun`
+is on, so a turn started at the machine can still be inspected, steered, or interrupted from a phone.
 
 - A session is placed by the same union the commands read: the workspace's registry account, or its
   cwd when the registry has not filed it yet.
@@ -334,9 +336,9 @@ harness refuses to boot**. Waiting until the gateway is up puts this bot last in
 line — wherever a UI owns the seam it has already taken it and this one declines.
 
 With it on, each question arrives as a card with a menu, gated by the same
-allowlist. Two limits worth knowing: a question with no options cannot be
-answered here at all (Discord has no free-text prompt outside a modal opened
-from an interaction), and an unanswered card **rejects** the ask after fifteen
+allowlist. If the question has options you can pick one; either way a
+**✍️ Custom answer** button opens a modal for free text, so an open-ended
+question is answerable too. An unanswered card **rejects** the ask after fifteen
 minutes — there is no `next()` to hand it back with, and a tool call blocked
 forever is worse than one that was cancelled.
 
@@ -344,7 +346,8 @@ forever is worse than one that was cancelled.
 
 `/dsh menu` posts one card that covers the command surface without typing — which matters on the
 machine this bot exists to be used from. Five rows: what to look at, which session, which setting to
-change, that setting's options, and refresh/close.
+change, that setting's options, and a row with **Search** (opens a modal), **Sync**, refresh and
+close.
 
 The card holds **no server-side state**. The view, the selected session and the open picker are
 encoded into its own components' ids and read back on the next click, so a card posted yesterday
@@ -492,7 +495,7 @@ what executes inside dsh.
 git clone https://github.com/Oliver0804/dsh-discord-bot
 cd dsh-discord-bot
 npm install       # discord.js only
-npm test          # 42 unit tests — no network, no harness, no Discord account
+npm test          # 76 unit tests — no network, no harness, no Discord account
 ```
 
 Layout:

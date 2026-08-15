@@ -438,16 +438,32 @@ test('full-text search refuses an empty query and a backend without search', asy
 })
 
 test('running-card buttons carry the session and gate stop on allowRun', () => {
-  const t = (key) => ({ 'action.trace': 'Trace', 'action.subagents': 'Subagents', 'action.stop': 'Stop' })[key]
+  const labels = {
+    'action.trace': 'Trace', 'action.timeline': 'Timeline', 'action.subagents': 'Subagents',
+    'action.todos': 'Todos', 'action.export': 'Export', 'action.steer': 'Steer',
+    'action.stop': 'Stop', 'action.confirmStop': 'Confirm stop', 'action.cancelStop': 'Cancel',
+  }
+  const t = (key) => labels[key]
   const readOnly = actionButtons('abcd1234', { allowRun: false, t })
-  const ids = readOnly.components.map((button) => button.data.custom_id)
-  assert.deepEqual(ids, ['dsh:act:abcd1234:trace', 'dsh:act:abcd1234:subagents'])
-  assert.equal(readOnly.components.length, 2, 'no stop button when allowRun is off')
+  assert.deepEqual(
+    readOnly[0].components.map((button) => button.data.custom_id),
+    ['dsh:act:abcd1234:trace', 'dsh:act:abcd1234:timeline', 'dsh:act:abcd1234:subagents', 'dsh:act:abcd1234:todos', 'dsh:act:abcd1234:export'],
+  )
+  assert.equal(readOnly.length, 1, 'no execution row when allowRun is off')
 
   const withStop = actionButtons('abcd1234', { allowRun: true, t })
-  assert.equal(withStop.components.length, 3)
-  assert.equal(withStop.components[2].data.custom_id, 'dsh:act:abcd1234:stop')
-  assert.equal(withStop.components[2].data.style, 4, 'stop is a danger button')
+  assert.equal(withStop.length, 2)
+  assert.deepEqual(
+    withStop[1].components.map((button) => button.data.custom_id),
+    ['dsh:act:abcd1234:steer', 'dsh:act:abcd1234:stop'],
+  )
+  assert.equal(withStop[1].components[1].data.style, 4, 'stop is a danger button')
+
+  const confirming = actionButtons('abcd1234', { allowRun: true, confirming: true, t })
+  assert.deepEqual(
+    confirming[1].components.map((button) => button.data.custom_id),
+    ['dsh:act:abcd1234:confirm', 'dsh:act:abcd1234:cancel'],
+  )
 
   assert.equal(isActionInteraction({ customId: 'dsh:act:abcd1234:trace' }), true)
   assert.equal(isActionInteraction({ customId: 'dsh:menu:view' }), false)
@@ -1694,4 +1710,27 @@ test('a resumed session is not announced as a new one', async () => {
 
   assert.equal(sent.length, 2, 'the fresh one and the shapeless one; never the resumed one')
   assert.equal(mirror.pending(), 0)
+})
+
+test('a finished card keeps only the buttons that still mean something', () => {
+  const t = translator('zh-Hant')
+
+  const running = actionButtons('ab12cd34', { allowRun: true, t })
+  assert.equal(running.length, 2, 'read row plus the execution row')
+  assert.deepEqual(
+    running[1].toJSON().components.map((button) => button.custom_id.split(':').at(-1)),
+    ['steer', 'stop'],
+  )
+
+  // Steering and stopping both act on a turn in flight. Leaving them on a card
+  // that already says ✅ invites a click the harness can only refuse.
+  const done = actionButtons('ab12cd34', { allowRun: true, done: true, t })
+  assert.equal(done.length, 1, 'the read row survives; the execution row does not')
+  assert.deepEqual(
+    done[0].toJSON().components.map((button) => button.custom_id.split(':').at(-1)),
+    ['trace', 'timeline', 'subagents', 'todos', 'export'],
+  )
+
+  // `allowRun` off has always meant read-only, done or not.
+  assert.equal(actionButtons('ab12cd34', { allowRun: false, t }).length, 1)
 })
