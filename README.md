@@ -15,6 +15,15 @@ session trajectories and live subagents from inside those channels.
    # my-api                ← workspace /Users/you/work/my-api
 ```
 
+| Register a workspace | The channel appears, private |
+|---|---|
+| ![Registering a workspace, its path autocompleted against the harness machine's filesystem](docs/screenshots/04-workspace-autocomplete-path.jpg) | ![The new channel in the dsh category, with the workspace id in its topic](docs/screenshots/06-new-channel-in-sidebar.jpg) |
+| **Send it work, watch the turn** | **Read back what actually happened** |
+| ![A running card naming the tool in flight, with Trace, Timeline, Subagents, Todos, Export, Steer and Stop](docs/screenshots/08-run-running.jpg) | ![The trace: every tool call and result, and a footer of timings, tokens and cache hit rate](docs/screenshots/10-trace-ephemeral.jpg) |
+
+The bot answers in the language of whoever is clicking, so these are one guild's Traditional
+Chinese — see [*Language*](#language). [More screenshots](docs/screenshots/).
+
 ## Reaching a machine you cannot route to
 
 The bot opens a **WebSocket out** to Discord's gateway and keeps it open. Every command arrives
@@ -136,6 +145,8 @@ session, so a per-session copy would be wrong (and would collide on the second s
 
 Run these inside a workspace channel. The `session` option is autocompleted — pick from a list of
 recent sessions instead of typing a uuid — and defaults to the newest session in that workspace.
+
+![Typing /dsh in a channel brings up the whole command surface, each with its own description](docs/screenshots/01-command-palette.jpg)
 
 | Command | Answers |
 |---|---|
@@ -348,6 +359,8 @@ forever is worse than one that was cancelled.
 machine this bot exists to be used from. Five rows: what to look at, which session, which setting to
 change, that setting's options, and a row with **Search** (opens a modal), **Sync**, refresh and
 close.
+
+![The menu card: dropdowns for the view, the session and the setting to change, over Search, Sync, refresh and close](docs/screenshots/11-menu.jpg)
 
 The card holds **no server-side state**. The view, the selected session and the open picker are
 encoded into its own components' ids and read back on the next click, so a card posted yesterday

@@ -14,6 +14,15 @@
    # my-api                ← 工作區 /Users/you/work/my-api
 ```
 
+| 註冊一個工作區 | 頻道就長出來，而且是私密的 |
+|---|---|
+| ![註冊工作區，路徑對著 harness 機器的檔案系統自動完成](docs/screenshots/04-workspace-autocomplete-path.jpg) | ![新頻道出現在 dsh 類別底下，主題列帶著工作區 id](docs/screenshots/06-new-channel-in-sidebar.jpg) |
+| **把工作送進去，即時看著跑** | **回頭讀它到底做了什麼** |
+| ![執行中的卡片標出正在跑的工具，下面是軌跡、時間軸、子代理、待辦、匯出，以及插話與中斷](docs/screenshots/08-run-running.jpg) | ![軌跡：每一次工具呼叫與結果，頁尾是耗時、token 數與快取命中率](docs/screenshots/10-trace-ephemeral.jpg) |
+
+Bot 用點擊者的語言回話，所以這幾張是某個伺服器的繁體中文介面 —— 見[*語言*](#語言)。
+[更多截圖](docs/screenshots/)。
+
 ## 為什麼能穿透外網
 
 Bot 主動**向外**建立一條 WebSocket 連到 Discord gateway 並保持連線。所有指令都走這條既有連線
@@ -128,6 +137,8 @@ pnpm add dsh-discord-bot
 
 在工作區頻道內執行。`session` 參數有自動完成 —— 從最近的工作階段清單挑選，不必手打 uuid ——
 省略時預設為該工作區最新的工作階段。
+
+![在頻道裡打 /dsh 就叫出完整的指令表，每一個都附說明](docs/screenshots/01-command-palette.jpg)
 
 | 指令 | 回答什麼 |
 |---|---|
@@ -304,6 +315,8 @@ patch 層的 plugin 列會**比它後面那些 bundle 更早**套用，所以在
 `/dsh menu` 會發一張卡片，把整個指令表面變成不用打字的操作 —— 這在手機上很重要，而手機正是這個
 bot 存在的理由。五排：要看什麼、選哪個工作階段、要改哪個設定、那個設定的選項、以及一排
 **搜尋**（開 modal）、**同步**、重新整理／關閉。
+
+![卡片選單：檢視、工作階段、要改哪個設定三個下拉，下面是搜尋、同步、重新整理與關閉](docs/screenshots/11-menu.jpg)
 
 這張卡片**沒有任何伺服器端狀態**：目前的檢視、選中的工作階段、開著的設定選單，全部編碼在它自己
 元件的 id 裡，下次點擊時再讀回來。所以昨天發的卡片在重啟之後照樣能用 —— **訊息本身就是狀態**。
