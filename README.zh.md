@@ -81,27 +81,24 @@ https://discord.com/oauth2/authorize?client_id=<APP_ID>&permissions=268487696&sc
 而 Discord 只會用一句空泛的「Missing Access」回報缺少它。沒有這個權限 bot 仍然能運作，
 但頻道會維持全伺服器可讀，而且每次同步都會告警。
 
-**3 — 安裝到 dsh profile。** 安裝腳本會裝套件、把 token 寫到
-`$DSH_HOME/discord-bot.token`（權限 600），並在 profile 的 patch 層附加一列設定。沒帶的參數會
+**3 — 安裝到 dsh profile。** 一行指令。安裝腳本會裝套件、把 bundle 註冊進 profile、把 token 寫到
+`$DSH_HOME/discord-bot.token`（權限 600），並在 profile 的 patch 層附加一列設定覆寫。沒帶的參數會
 互動詢問；若已存在設定列，會在完全不動 profile 的情況下直接拒絕：
 
 ```bash
-git clone https://github.com/Oliver0804/dsh-discord-bot
-cd dsh-discord-bot
-npm install
-node bin/setup.js --profile web
+npx dsh-discord-bot-setup --profile web
 ```
-
-安裝腳本會把 checkout 打包成 tarball 裝進 profile、寫入 token、附加設定列 ——
-為什麼是裝 tarball 而不是 link 目錄，見*開發與建置*一節。
 
 非互動模式：
 
 ```bash
-node bin/setup.js --profile web --guild 123456789012345678 --token "$TOKEN" --yes
+npx dsh-discord-bot-setup --profile web --guild 123456789012345678 --token "$TOKEN" --yes
 ```
 
 加上 `--print` 可以只預覽要寫入的設定列，不做任何變更。
+
+從 git checkout 執行（`node bin/setup.js …`）行為相同，差別只在它安裝的是*那份 checkout* 而不是
+已發布的版本 —— 為什麼是打包成 tarball 而不是 link 目錄，見*開發與建置*一節。
 
 接著重啟 dsh：
 
@@ -114,24 +111,47 @@ dsh --profile web
 ### 手動安裝
 
 ```bash
-cd "${DSH_HOME:-$HOME/.dsh}/profiles/web"
-pnpm add dsh-discord-bot
+dsh plugin --profile web add dsh-discord-bot
 ```
 
-在該 profile 的 `cordis.patch.yml` 附加：
+這會裝好套件，並把它加進 profile 的 `dsh.profile.bundles` —— 這一步才讓本套件自帶的
+`cordis.patch.yml` 成為組合樹的一層，而那一層負責掛載 plugin。掛上之後它會以**離線**狀態啟動並在
+日誌說明原因，因為還沒有人告訴它要綁哪個 guild。在該 profile 自己的 `cordis.patch.yml` 用
+id 指定覆寫補上：
 
 ```yaml
-- insert:
-    - id: discord-bot
-      name: 'dsh-discord-bot'
-      config:
-        guildId: '123456789012345678'
-        tokenFile: '/Users/you/.dsh/discord-bot.token'
-        categoryName: 'dsh'
+- id: discord-bot
+  config:
+    guildId: '123456789012345678'
+    tokenFile: '/Users/you/.dsh/discord-bot.token'
+    categoryName: 'dsh'
 ```
+
+是**覆寫**，不是再寫一個 `insert`。bundle 層已經掛了那一列，而兩層帶同一個 id 並不會合併 ——
+它們會組合出兩個實例，也就是兩個 bot 連同一個 guild、每道指令回答兩次。
+`dsh --profile web --dump-config` 可以看組合後的樹：那一列應該只出現一次，標頭是
+`dsh-discord-bot, patched by <你的 cordis.patch.yml>`。
 
 這個 plugin 屬於 **host** 層而非 agent preset：它服務所有工作區與所有工作階段，放進 preset
 會變成每個 session 一份（而且第二個 session 就會撞名）。
+
+### 從 0.3.1 以前的版本升級
+
+那些版本沒有 bundle 層，所以安裝腳本寫進 profile 的是一列完整的 `insert:`。現在套件會自己掛載，
+那一列就變成**第二個** bot。把它換成上面的覆寫形式，值保留原本的：
+
+```yaml
+# 之前                             # 之後
+- insert:                         - id: discord-bot
+    - id: discord-bot               config:
+      name: 'dsh-discord-bot'         guildId: '…'
+      config:                         tokenFile: '…'
+        guildId: '…'
+```
+
+還沒改之前也不會壞：bundle 那一列沒有任何設定，所以它只會在日誌留下一行「缺 `guildId`」然後停在
+離線狀態，而不是讓整個組合失敗。改完用 `dsh --profile web --dump-config` 確認 —— 只有一個
+`id: discord-bot`，不是兩個。
 
 ## 指令
 
@@ -485,14 +505,15 @@ npm test          # 76 個單元測試 —— 不需網路、不需 harness、�
 | `lib/attachments.js` | 頻道檔案，讀成提示的 content block |
 | `lib/routing.js` | 工作階段 → 工作區 → 頻道的解析與快取，與授權卡片共用 |
 | `lib/menu.js` | `/dsh menu` 卡片與它的無狀態元件 |
-| `bin/setup.js` | 安裝器 |
+| `bin/setup.js` | 安裝器：套件、bundle 註冊、token、設定覆寫 |
+| `cordis.patch.yml` | bundle 層 —— 只負責掛載 plugin，不帶任何設定 |
 
 要在不動到自己 profile 的情況下測試真實 harness：安裝打包後的 tarball，
 再用 overlay patch 在另一個 port 起第二個實例：
 
 ```bash
 npm pack
-(cd "${DSH_HOME:-$HOME/.dsh}/profiles/web" && pnpm add /path/to/dsh-discord-bot-0.1.0.tgz)
+(cd "${DSH_HOME:-$HOME/.dsh}/profiles/web" && pnpm add /path/to/dsh-discord-bot-<版本>.tgz)
 dsh --profile web --patch ./my-test-patch.yml --port 3099
 ```
 

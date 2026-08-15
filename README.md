@@ -88,28 +88,26 @@ what makes the channels private — requires Manage Roles, and Discord reports i
 bare "Missing Access". Without it the bot still works, but the channels stay world-readable and it
 says so on every sync.
 
-**3 — Install into a dsh profile.** The setup script installs the package, writes the token to
-`$DSH_HOME/discord-bot.token` (mode 600), and appends a row to the profile's patch layer. It asks
-for anything you do not pass, and refuses without touching the profile if a row already exists:
+**3 — Install into a dsh profile.** One command. The setup script installs the package, registers
+its bundle with the profile, writes the token to `$DSH_HOME/discord-bot.token` (mode 600), and
+appends a config override to the profile's patch layer. It asks for anything you do not pass, and
+refuses without touching the profile if a row already exists:
 
 ```bash
-git clone https://github.com/Oliver0804/dsh-discord-bot
-cd dsh-discord-bot
-npm install
-node bin/setup.js --profile web
+npx dsh-discord-bot-setup --profile web
 ```
-
-The setup script packs the checkout into a tarball, installs that into the profile, writes the
-token, and appends the plugin row — see *Development* for why it installs a tarball rather than
-linking the directory.
 
 Non-interactive:
 
 ```bash
-node bin/setup.js --profile web --guild 123456789012345678 --token "$TOKEN" --yes
+npx dsh-discord-bot-setup --profile web --guild 123456789012345678 --token "$TOKEN" --yes
 ```
 
 Add `--print` to see the row it would write without changing anything.
+
+Run from a git checkout (`node bin/setup.js …`) it does the same thing, except that it packs and
+installs *that checkout* rather than the published version — see *Development* for why it installs
+a tarball rather than linking the directory.
 
 Then restart dsh:
 
@@ -122,24 +120,48 @@ Open the new **dsh** category and run `/dsh status`.
 ### Manual install
 
 ```bash
-cd "${DSH_HOME:-$HOME/.dsh}/profiles/web"
-pnpm add dsh-discord-bot
+dsh plugin --profile web add dsh-discord-bot
 ```
 
-Append to that profile's `cordis.patch.yml`:
+That installs the package and appends it to the profile's `dsh.profile.bundles`, which is what
+makes this package's own `cordis.patch.yml` a layer of the composed tree — and that layer mounts
+the plugin. It comes up **offline** and says so in the log, because nothing has told it which guild
+to bind to yet. Fill that in with an id-targeted override in the profile's own `cordis.patch.yml`:
 
 ```yaml
-- insert:
-    - id: discord-bot
-      name: 'dsh-discord-bot'
-      config:
-        guildId: '123456789012345678'
-        tokenFile: '/Users/you/.dsh/discord-bot.token'
-        categoryName: 'dsh'
+- id: discord-bot
+  config:
+    guildId: '123456789012345678'
+    tokenFile: '/Users/you/.dsh/discord-bot.token'
+    categoryName: 'dsh'
 ```
+
+An override, **not** a second `insert`. The bundle layer already mounts the row, and two layers
+carrying the same id do not merge — they compose two instances, which is two bots on one guild
+answering every command twice. `dsh --profile web --dump-config` shows the composed tree; the row
+should appear once, headed `dsh-discord-bot, patched by <your cordis.patch.yml>`.
 
 The plugin belongs to the **host** plane, not an agent preset: it serves every workspace and every
 session, so a per-session copy would be wrong (and would collide on the second session).
+
+### Upgrading from 0.3.1 or earlier
+
+Those versions shipped no bundle layer, so the setup script wrote a full `insert:` row into your
+profile. The package now mounts itself, so that row composes a **second** bot. Replace it with the
+override above, keeping your own values:
+
+```yaml
+# before                          # after
+- insert:                         - id: discord-bot
+    - id: discord-bot               config:
+      name: 'dsh-discord-bot'         guildId: '…'
+      config:                         tokenFile: '…'
+        guildId: '…'
+```
+
+Nothing breaks while you have not: the bundle's row has no configuration, so it logs one line about
+a missing `guildId` and parks offline rather than failing the composition. Confirm with
+`dsh --profile web --dump-config` — one `id: discord-bot`, not two.
 
 ## Commands
 
@@ -554,14 +576,15 @@ Layout:
 | `lib/attachments.js` | Channel files, read into prompt content blocks |
 | `lib/routing.js` | Session → workspace → channel, cached, shared with approvals |
 | `lib/menu.js` | The `/dsh menu` card and its stateless components |
-| `bin/setup.js` | Installer |
+| `bin/setup.js` | Installer: package, bundle registration, token, config override |
+| `cordis.patch.yml` | The bundle layer — mounts the plugin, and configures nothing |
 
 To test against a live harness without touching your own profile, install the packed tarball and
 boot a second instance with an overlay patch on another port:
 
 ```bash
 npm pack
-(cd "${DSH_HOME:-$HOME/.dsh}/profiles/web" && pnpm add /path/to/dsh-discord-bot-0.1.0.tgz)
+(cd "${DSH_HOME:-$HOME/.dsh}/profiles/web" && pnpm add /path/to/dsh-discord-bot-<version>.tgz)
 dsh --profile web --patch ./my-test-patch.yml --port 3099
 ```
 

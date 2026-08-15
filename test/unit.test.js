@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { format } from 'node:util'
 
 import { isAuthorized, normalizeConfig, resolveToken } from '../lib/config.js'
 import { PermissionFlagsBits } from 'discord.js'
@@ -104,14 +105,18 @@ test('the topic anchor round-trips and ignores unmanaged channels', () => {
   assert.equal(workspaceIdFromTopic(undefined), undefined)
 })
 
-test('config validation fills defaults and demands a real guild id', () => {
+test('config validation fills defaults, tolerates an unset guild id, and rejects a wrong one', () => {
   const config = normalizeConfig({ guildId: '123456789012345678' })
   assert.equal(config.categoryName, 'dsh')
   assert.equal(config.traceLimit, 25)
   assert.equal(config.manageChannels, true)
   assert.deepEqual(config.allowedUserIds, [])
 
-  assert.throws(() => normalizeConfig({}), /`guildId` is required/)
+  // The bundle layer mounts this plugin the moment it is installed, before any
+  // override names a guild. Throwing there is a failed composition, which takes
+  // the whole harness down at boot — so "not configured yet" has to validate.
+  assert.equal(normalizeConfig({}).guildId, undefined, 'an unconfigured plugin validates, and parks offline')
+  // "Configured wrong" is a different thing, and stays loud.
   assert.throws(() => normalizeConfig({ guildId: 'my-server' }), /numeric Discord snowflake/)
   assert.throws(() => normalizeConfig({ guildId: '123456789012345678', traceLimit: 0 }), /`traceLimit` must be an integer/)
   assert.throws(() => normalizeConfig({ guildId: '123456789012345678', allowedUserIds: 'me' }), /`allowedUserIds` must be a list/)
@@ -2035,6 +2040,30 @@ test('the questions seam is never claimed during activation', async () => {
   assert.equal(claimed, 0, 'activation must leave the seam alone; onReady claims it')
 
   // Releases the login retry timer and the half-connected client.
+  await disposer?.()
+})
+
+test('a bundle-mounted plugin with no config at all activates and parks offline', async () => {
+  // `dsh plugin add dsh-discord-bot` installs the package, appends it to the
+  // profile's bundles, and this package's own patch layer mounts the row — all
+  // before anyone has written a guild id. `apply` used to throw straight out of
+  // `normalizeConfig` on that path, and Cordis treats an activation failure as
+  // a failed composition: installing the plugin would have stopped dsh from
+  // booting at all, which is a spectacularly bad first impression.
+  const { plugin } = await import('../lib/index.js')
+
+  const warnings = []
+  let disposer
+  const ctx = {
+    get: () => undefined,
+    on: () => () => {},
+    effect: (effect) => { disposer = effect() },
+    logger: { warn: (...args) => warnings.push(format(...args)), info() {}, error() {}, debug() {} },
+  }
+
+  assert.doesNotThrow(() => plugin.apply(ctx, undefined), 'an unconfigured mount must not fail the composition')
+  assert.match(warnings.join('\n'), /guildId/, 'and it names what is missing rather than going quiet')
+
   await disposer?.()
 })
 

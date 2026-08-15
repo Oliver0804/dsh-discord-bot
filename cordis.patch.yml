@@ -1,0 +1,21 @@
+# The bundle layer this package contributes, named by `dsh.bundle.patch` in
+# package.json. `dsh plugin add dsh-discord-bot` installs the package, appends
+# it to the profile's `dsh.profile.bundles`, and this layer then mounts the row
+# below — which is the whole reason the plugin is installable in one command.
+#
+# It mounts the plugin and nothing else. Configuration deliberately does not
+# live here: this file belongs to the package and is replaced on every upgrade,
+# so a guild id written here would be lost the first time anyone updated. The
+# profile's own cordis.patch.yml is the layer that survives, and it applies
+# after this one — an id-targeted override there fills this row in:
+#
+#     - id: discord-bot
+#       config:
+#         guildId: '...'
+#
+# `dsh-discord-bot-setup` writes exactly that. Until something does, the plugin
+# mounts and parks itself offline rather than failing the composition; see
+# `normalizeConfig` in lib/config.js for why that distinction is load-bearing.
+- insert:
+    - id: discord-bot
+      name: dsh-discord-bot

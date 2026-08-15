@@ -44,47 +44,65 @@ function dshHome() {
 
 /**
  * Build the YAML row appended to the profile's patch layer.
+ *
+ * An id-targeted config override, not an `insert`. The package's own bundle
+ * layer is what mounts the plugin, and the two layers do not merge: a second
+ * insert of the same id composes a *second* instance, so a profile carrying
+ * both would run two bots against one guild and answer every command twice.
+ * Overriding leaves one row, filled in — `dsh --dump-config` shows it as
+ * "dsh-discord-bot, patched by <this file>".
+ *
  * @param {object} answers - the collected configuration.
  * @returns {string} a top-level patch entry.
  */
 function renderRow(answers) {
   const lines = [
     '',
-    '# Added by dsh-discord-bot-setup. Maps every workspace onto one Discord',
-    '# category, one channel each, and answers /dsh commands from those channels.',
-    '- insert:',
-    `    - id: ${ROW_ID}`,
-    `      name: '${PACKAGE_NAME}'`,
-    '      config:',
-    `        guildId: '${answers.guildId}'`,
-    `        categoryName: '${answers.categoryName}'`,
+    '# Added by dsh-discord-bot-setup. The plugin is mounted by its own bundle',
+    '# layer; this row is the configuration that layer deliberately leaves out.',
+    '# Maps every workspace onto one Discord category, one channel each, and',
+    '# answers /dsh commands from those channels.',
+    `- id: ${ROW_ID}`,
+    '  config:',
+    `    guildId: '${answers.guildId}'`,
+    `    categoryName: '${answers.categoryName}'`,
   ]
-  if (answers.tokenFile !== undefined) lines.push(`        tokenFile: '${answers.tokenFile}'`)
+  if (answers.tokenFile !== undefined) lines.push(`    tokenFile: '${answers.tokenFile}'`)
   if (answers.allowedUserIds.length > 0) {
-    lines.push('        allowedUserIds:')
-    for (const id of answers.allowedUserIds) lines.push(`          - '${id}'`)
+    lines.push('    allowedUserIds:')
+    for (const id of answers.allowedUserIds) lines.push(`      - '${id}'`)
   }
   lines.push('')
   return lines.join('\n')
 }
 
+/** @returns {object} this package's own manifest. */
+function ownManifest() {
+  return JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+}
+
 /**
  * The spec handed to `pnpm add`.
  *
- * Deliberately a freshly packed tarball rather than this directory. `pnpm add
- * <dir>` creates a link, and a link breaks both ways that matter: run through
- * `npx`, it would point at a temp directory that disappears; run from a
- * checkout, the linked package resolves its own `node_modules`, which is how a
- * plugin ends up bound to a second copy of a dependency the host also holds.
- * A tarball installs a real, self-contained copy.
+ * The published version by default — a registry install is prebuilt, which
+ * skips dsh's `allowBuilds` approval step, and it leaves no tarballs piling up
+ * in `$DSH_HOME`.
  *
- * It lands in `$DSH_HOME`, not the system temp directory: pnpm records the
- * absolute path it was given, and macOS prunes `/var/folders`, so a temp
- * tarball turns into a profile that fails its next `pnpm install` weeks later.
+ * From a git checkout it packs that checkout instead, because someone running
+ * this script from a clone means the code in front of them, not the last
+ * release. Deliberately a freshly packed tarball rather than the directory:
+ * `pnpm add <dir>` creates a link, and a linked package resolves its own
+ * `node_modules`, which is how a plugin ends up bound to a second copy of a
+ * dependency the host also holds. The tarball lands in `$DSH_HOME`, not the
+ * system temp directory — pnpm records the absolute path it was given, and
+ * macOS prunes `/var/folders`, so a temp tarball turns into a profile that
+ * fails its next `pnpm install` weeks later.
  *
- * @returns {string} an absolute path to the packed tarball.
+ * @returns {string} a registry spec, or an absolute path to a packed tarball.
  */
 function installSpec() {
+  if (!existsSync(join(packageRoot, '.git'))) return `${PACKAGE_NAME}@${ownManifest().version}`
+
   const destination = dshHome()
   const output = execFileSync('npm', ['pack', '--silent', '--pack-destination', destination], {
     cwd: packageRoot,
@@ -96,14 +114,62 @@ function installSpec() {
 }
 
 /**
+ * Append this package to the profile's bundle list, which is what makes its
+ * `cordis.patch.yml` a layer of the composed tree at all.
+ *
+ * `dsh plugin add` does this itself; `pnpm add` does not, and this script calls
+ * pnpm directly so that it works whether or not `dsh` is on the PATH.
+ *
+ * @param {string} profileDir - the profile directory.
+ * @returns {boolean} true when the list was changed.
+ */
+function registerBundle(profileDir) {
+  const file = join(profileDir, 'package.json')
+  const manifest = JSON.parse(readFileSync(file, 'utf8'))
+  const bundles = manifest.dsh?.profile?.bundles
+  if (!Array.isArray(bundles)) throw new Error(`${file} has no dsh.profile.bundles list to register into`)
+  if (bundles.includes(PACKAGE_NAME)) return false
+
+  bundles.push(PACKAGE_NAME)
+  writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  return true
+}
+
+/**
  * Refuse early when the profile already carries a row for this plugin. Checked
  * before anything is installed or written, so a second run is a no-op rather
  * than a package install followed by a refusal.
  * @param {string} file - path to the profile's `cordis.patch.yml`.
  */
 function assertNotInstalled(file) {
-  if (readFileSync(file, 'utf8').includes(PACKAGE_NAME)) {
-    throw new Error(`${file} already references ${PACKAGE_NAME}; edit that row instead of adding a second one`)
+  const current = readFileSync(file, 'utf8')
+
+  // The pre-0.3.2 shape, from before this package shipped a bundle layer: a
+  // full `insert` row naming the package. Left in place it now composes a
+  // *second* instance beside the bundle's own — two bots on one guild, every
+  // command answered twice — so say exactly what to replace it with.
+  //
+  // Matched on the `name:` field rather than the bare package name, which also
+  // appears in the comment this script writes above its own row: a substring
+  // test sends a correctly-migrated profile down the migration advice.
+  if (new RegExp(`^\\s*name:\\s*['"]?${PACKAGE_NAME}['"]?\\s*$`, 'm').test(current)) {
+    throw new Error([
+      `${file} already references ${PACKAGE_NAME}.`,
+      '',
+      '  If that is an `insert:` row from an older version, replace it with a config',
+      '  override. The package mounts itself now, and a second insert of the same id',
+      '  runs a second bot against the same guild:',
+      '',
+      `    - id: ${ROW_ID}`,
+      '      config:',
+      "        guildId: '...'        # keep the values from the old row",
+      '',
+      '  Then check it with: dsh --profile <name> --dump-config',
+    ].join('\n'))
+  }
+
+  if (new RegExp(`^\\s*-?\\s*id:\\s*${ROW_ID}\\s*$`, 'm').test(current)) {
+    throw new Error(`${file} already carries a \`${ROW_ID}\` row; edit that one instead of adding a second`)
   }
 }
 
@@ -178,11 +244,14 @@ async function main() {
     return
   }
 
-  process.stdout.write(`\n▸ installing ${PACKAGE_NAME} into ${profileDir}\n`)
-  execFileSync('pnpm', ['add', installSpec()], { cwd: profileDir, stdio: 'inherit' })
+  const spec = installSpec()
+  process.stdout.write(`\n▸ installing ${spec} into ${profileDir}\n`)
+  execFileSync('pnpm', ['add', spec], { cwd: profileDir, stdio: 'inherit' })
+
+  if (registerBundle(profileDir)) process.stdout.write(`▸ registered the bundle in ${join(profileDir, 'package.json')}\n`)
 
   appendRow(patchFile, row)
-  process.stdout.write(`▸ wrote the plugin row to ${patchFile}\n`)
+  process.stdout.write(`▸ wrote the config override to ${patchFile}\n`)
   if (tokenFile !== undefined) process.stdout.write(`▸ wrote the token to ${tokenFile} (mode 600)\n`)
 
   process.stdout.write([
