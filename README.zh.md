@@ -131,9 +131,9 @@ pnpm add dsh-discord-bot
 | `/dsh subagents [session] [deep]` | 子代理清單，以及每個是**運行中**還是已結束。 |
 | `/dsh run <prompt>` | 把工作送給該工作區的代理並即時觀看。需要 `allowRun`。 |
 | `/dsh lineage [session]` | 上游與下游的工作階段關係。 |
-| `/dsh model [to]` | 顯示或切換預設模型（選項由 provider 目錄自動完成）。 |
+| `/dsh model [to]` | 顯示或切換預設模型（選項由 provider 目錄自動完成；目錄為空時退回目前模型）。 |
 | `/dsh workspace <path>` | 把一個目錄註冊成工作區並建立頻道（路徑有自動完成）。 |
-| `/dsh status` | 已掛載的服務、工作階段數量、已對應的工作區。 |
+| `/dsh status` | 已掛載的服務、工作階段數量、工作區清單與已對應的頻道數。 |
 | `/dsh sync` | 立即重新同步類別、頻道與其私密設定。 |
 
 `trace` 直接使用 harness 自己的語意文件投影，所以推理區塊、串流分塊、結構性邊界都已經濾掉了；
@@ -152,8 +152,11 @@ pnpm add dsh-discord-bot
 
 ### 執行工作與授權卡片
 
-`run` 接續該工作區最新的工作階段：已在運行的代理直接用，冷的則 resume 回來，
-而**還沒有任何工作階段的工作區會直接建一個新的**，根目錄就是該工作區。
+`run` 接續該工作區最新的工作階段——除非還有更舊的工作階段仍在運行，因為**同一工作區
+絕不會同時跑兩個代理**。已在運行的代理直接用，冷的則 resume 回來（會一併重掛模型選擇與
+preset，見下），而**還沒有任何工作階段的工作區會直接建一個新的**，根目錄就是該工作區。
+每次 run 也會把 session 登記到 dsh 的 workspace 帳戶下，所以它會出現在該工作區的頻道，
+而不是「Ungrouped」。
 
 Turn 的回報方式是**每隔幾秒改寫同一則訊息**：Discord 大約限制每個頻道 5 則訊息 / 5 秒，
 而一個忙碌的 turn 會產生數百個事件。即時視圖會濾掉推理區塊，完整紀錄之後用 `/dsh trace` 看。
@@ -181,7 +184,7 @@ schema，於是把工具呼叫當成純文字寫出來，而沒有任何東西�
 |---|---|
 | `off`（預設） | 完全忽略訊息，只有 `/dsh run` 有作用。 |
 | `mention` | 只有 @ 到 bot 的訊息會被當成 prompt。 |
-| `all` | 工作區頻道內的每則訊息都是 prompt。 |
+| `all` | 工作區頻道內的每則訊息都是 prompt。以 `/` 開頭的訊息會被忽略——否則會跟指令表面衝突。 |
 
 聊天模式同時需要 `allowRun`，並且需要 **Message Content** 特權 intent —— 你必須先到 Developer
 Portal 的 *Bot → Privileged Gateway Intents* 開啟它。**應用程式請求一個沒有啟用的 intent 時，
@@ -219,7 +222,7 @@ LLM 與工具耗時、首字時間、解碼速率、快取命中、token 數。�
 | `runVerbosity` | `minimal` | `minimal` 只給答案；`full` 串流完整過程。 |
 | `language` | `auto` | `auto` / `en` / `zh-Hant` / `zh-Hans` —— 回覆使用的語言。 |
 | `followNewWorkspaces` | `true` | 出現未對應工作區的新工作階段時自動建立頻道。 |
-| `traceLimit` | `25` | `/dsh trace` 預設筆數。 |
+| `traceLimit` | `25` | `/dsh trace` 預設筆數 —— 也是 `/dsh timeline` 的預設筆數。 |
 | `sessionLimit` | `15` | `/dsh sessions` 預設筆數。 |
 | `retrySeconds` | `30` | Discord 登入失敗的重試間隔。 |
 
@@ -299,7 +302,7 @@ Slash 指令仍可用，因為 interaction 自己帶 token。
 git clone https://github.com/Oliver0804/dsh-discord-bot
 cd dsh-discord-bot
 npm install       # 只有 discord.js
-npm test          # 22 個單元測試 —— 不需網路、不需 harness、不需 Discord 帳號
+npm test          # 42 個單元測試 —— 不需網路、不需 harness、不需 Discord 帳號
 ```
 
 檔案分工：
@@ -332,4 +335,4 @@ dsh --profile web --patch ./my-test-patch.yml --port 3099
 
 ## 授權
 
-MIT
+MIT —— 見 [LICENSE](LICENSE)。

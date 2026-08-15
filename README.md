@@ -139,9 +139,9 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 | `/dsh subagents [session] [deep]` | Subagents and whether each is **running** or inactive. |
 | `/dsh run <prompt>` | Send work to the workspace's agent and watch the turn. Needs `allowRun`. |
 | `/dsh lineage [session]` | Ancestor and descendant sessions. |
-| `/dsh model [to]` | Show the default model, or switch it (autocompleted from the provider catalog). |
+| `/dsh model [to]` | Show the default model, or switch it (autocompleted from the provider catalog, falling back to the current model when the catalog is empty). |
 | `/dsh workspace <path>` | Register a directory as a workspace and give it a channel (path is autocompleted). |
-| `/dsh status` | Mounted services, session counts, mapped workspaces. |
+| `/dsh status` | Mounted services, session counts, the workspace list, and how many channels are mapped. |
 | `/dsh sync` | Re-sync the category, its channels, and their privacy now. |
 
 `trace` reads the harness's own semantic-document projection, so reasoning blocks, stream chunks,
@@ -164,8 +164,11 @@ information about the machine, so the hints are gated exactly like the commands.
 
 ### Running work, and approvals
 
-`run` continues the workspace's newest session — a live agent is used as-is, a cold one is resumed,
-and a workspace with no session yet gets a fresh one rooted at its directory.
+`run` continues the workspace's newest session — unless an older one is still live, because a
+workspace never runs two agents at once. A live agent is used as-is, a cold one is resumed (with
+the model selection and preset reinstalled, see below), and a workspace with no session yet gets a
+fresh one rooted at its directory. Each run also files the session under the workspace in dsh's
+registry, so it shows up in that workspace's channel instead of under "Ungrouped".
 
 The turn is reported by rewriting one message every few seconds — Discord allows about five
 messages per five seconds per channel, and a busy turn emits hundreds of events. Reasoning blocks
@@ -198,7 +201,7 @@ With `listenToMessages`, an ordinary message in a workspace channel becomes work
 |---|---|
 | `off` *(default)* | Messages are ignored entirely; only `/dsh run` works. |
 | `mention` | A message that @-mentions the bot is treated as a prompt. |
-| `all` | Every message in a workspace channel is a prompt. |
+| `all` | Every message in a workspace channel is a prompt. A line that starts with `/` is ignored — it would otherwise collide with the command surface. |
 
 Chat mode also requires `allowRun`, and it needs the **Message Content** privileged intent, which
 you must enable first under *Bot → Privileged Gateway Intents* in the Developer Portal. Discord
@@ -241,7 +244,7 @@ cannot change them.
 | `runVerbosity` | `minimal` | `minimal` shows the answer; `full` streams the whole transcript. |
 | `language` | `auto` | `auto` / `en` / `zh-Hant` / `zh-Hans` — the language replies are written in. |
 | `followNewWorkspaces` | `true` | Create a channel when a session appears for an unmapped workspace. |
-| `traceLimit` | `25` | Default entries per `/dsh trace`. |
+| `traceLimit` | `25` | Default entries per `/dsh trace` — also the default per `/dsh timeline`. |
 | `sessionLimit` | `15` | Default sessions per `/dsh sessions`. |
 | `retrySeconds` | `30` | Delay between Discord login retries. |
 
@@ -334,7 +337,7 @@ what executes inside dsh.
 git clone https://github.com/Oliver0804/dsh-discord-bot
 cd dsh-discord-bot
 npm install       # discord.js only
-npm test          # 22 unit tests — no network, no harness, no Discord account
+npm test          # 42 unit tests — no network, no harness, no Discord account
 ```
 
 Layout:
@@ -368,4 +371,4 @@ its only contact with the harness is the `ctx` object handed to `apply`.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
