@@ -40,7 +40,7 @@ DDNS、不用反向代理，也不用把機器的鑰匙交給任何穿透服務*
 排程）都會即時出現在它所屬工作區的頻道裡。**預設關閉**，因為它等於把工作階段內容持續匯出到
 一個聊天平台。
 
-**寫入** —— 註冊工作區（`/dsh workspace`）、切換預設模型（`/dsh model`）、
+**寫入** —— 註冊工作區（`/dsh workspace`）、切換模型（`/dsh model`）、
 Agent 預設（`/dsh preset`）、權限模式（`/dsh permission`）。
 
 **執行工作** —— `/dsh run <prompt>` 把 prompt 送給該工作區的代理，並即時回傳整個 turn。
@@ -171,15 +171,15 @@ id 指定覆寫補上：
 | `/dsh subagents [session] [deep]` | 子代理清單，以及每個是**運行中**還是已結束。 |
 | `/dsh run <prompt>` | 把工作送給該工作區的代理並即時觀看。需要 `allowRun`。 |
 | `/dsh lineage [session]` | 上游與下游的工作階段關係。 |
-| `/dsh model [to]` | 顯示或切換預設模型（選項由 provider 目錄自動完成；目錄為空時退回目前模型）。 |
+| `/dsh model [to] [session]` | 顯示或切換模型（選項由 provider 目錄自動完成；目錄為空時退回目前模型）。切換會同時改預設值**與**它指向的執行中工作階段（預設是這個頻道自己的），因為工作階段會一直維持它上一輪跑的模型，直到有人把它換掉。 |
 | `/dsh todos [session]` | 執行中工作階段正在跑的待辦清單。 |
 | `/dsh context [session]` | 那個工作階段實際擁有的提示區段、工具與技能。 |
 | `/dsh export [session]` | 完整軌跡，輸出成 Markdown 附件。 |
 | `/dsh cmd [name] [input]` | 列出或執行 **harness 自己的指令** —— `/compact`、`/plan`，以及這個部署註冊的任何指令。執行需要 `allowRun`。 |
 | `/dsh stop [session]` | 中斷某個工作階段現在正在跑的 turn。需要 `allowRun`。 |
 | `/dsh rewind [session]` | 從較早的提示接續，開成新的工作階段。需要 `allowRun`。 |
-| `/dsh preset [to]` | 顯示或切換新工作階段使用的 Agent 預設。切換需要 `allowRun`。 |
-| `/dsh permission [to] [session]` | 顯示或切換權限：新工作階段的預設值，或某個執行中的工作階段。切換需要 `allowRun`。 |
+| `/dsh preset [to]` | 顯示或切換新工作階段使用的 Agent 預設。只影響新的：工作階段一旦跑過一輪，harness 就把它的 preset 固定住，所以與模型不同，這個沒辦法跟著執行中的對話改。切換需要 `allowRun`。 |
+| `/dsh permission [to] [session]` | 顯示或切換權限。指定 session 只改那一個；不指定則同時改這個頻道執行中的對話**與**預設值。切換需要 `allowRun`。 |
 | `/dsh workspace <path>` | 把一個目錄註冊成工作區並建立頻道（路徑有自動完成）。 |
 | `/dsh status` | 已掛載的服務、工作階段數量、工作區清單與已對應的頻道數。 |
 | `/dsh sync` | 立即重新同步類別、頻道與其私密設定 —— 順便把「位在某個已註冊工作區目錄下、卻沒被掛進去」的工作階段補歸檔。 |
@@ -397,6 +397,8 @@ LLM 與工具耗時、首字時間、解碼速率、快取命中、token 數。�
 | `mirrorSubagents` | `false` | 推播是否包含子代理工作階段。一個 turn 可以展開出十幾個。 |
 | `mirrorNewSessions` | `true` | 新工作階段建立時在頻道公告一則。只在 `mirror` 開啟時有作用。 |
 | `mirrorApprovals` | `false` | 連不是這個 bot 發起的工作階段，授權問題也送到 Discord。**web 端的人得等這張卡片的兩分鐘。** |
+| `sessionThreads` | `false` | 每個工作階段在工作區頻道底下開自己的討論串，而不是所有工作階段的 turn 交錯在同一個頻道。也順帶消除目標的猜測：在討論串裡打的指令或訊息就是對**那個**工作階段，不管同時有幾個在跑。 |
+| `sessionThreadsBackfill` | `5` | 每個工作區最近幾個工作階段一開始就給討論串，每條開起來就有一張卡片說它上次在做什麼。`0` 表示等工作階段自己說話才開。需要 `mirror`，因為卡片會引用對話內容。 |
 | `answerQuestions` | `false` | 在 Discord 回答 `ask_user_question`。接縫沒人佔就接管；被 UI 佔走則改鏡射 gateway 的待答問題，**兩邊都能回答，誰先答誰算數**。 |
 | `followNewWorkspaces` | `true` | 出現未對應工作區的新工作階段時自動建立頻道。 |
 | `traceLimit` | `25` | `/dsh trace` 預設筆數 —— 也是 `/dsh timeline` 的預設筆數。 |

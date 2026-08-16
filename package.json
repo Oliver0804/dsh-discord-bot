@@ -1,6 +1,6 @@
 {
   "name": "dsh-discord-bot",
-  "version": "0.3.4",
+  "version": "0.3.9",
   "description": "Map dsh workspaces onto Discord — watch every session live, drive and steer agents, and reach the harness's own commands from anywhere, with no inbound port.",
   "repository": {
     "type": "git",

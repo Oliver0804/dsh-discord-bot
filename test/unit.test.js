@@ -8,10 +8,11 @@ import { format } from 'node:util'
 import { isAuthorized, normalizeConfig, resolveToken } from '../lib/config.js'
 import { PermissionFlagsBits } from 'discord.js'
 
-import { channelSlug, deniesEveryone, workspaceIdFromTopic } from '../lib/topology.js'
-import { displayEntry, preferRunning, renderTurnBody, resolveAgent, rewindBoundary, rewindPoints, rewindSession, userMessage } from '../lib/run.js'
+import { channelSlug, deniesEveryone, shortFromThreadName, threadName, workspaceIdFromTopic } from '../lib/topology.js'
+import { composeAgent, displayEntry, liveSessionFor, preferRunning, renderTurnBody, resolveAgent, rewindBoundary, rewindPoints, rewindSession, userMessage } from '../lib/run.js'
 import { installApprovalAnswerer } from '../lib/approval.js'
 import { createChannelResolver } from '../lib/routing.js'
+import { createThreadBackfill } from '../lib/backfill.js'
 import { createMirror } from '../lib/mirror.js'
 import { createActivityTracker } from '../lib/activity.js'
 import { assembleContextFor, serviceForAgent } from '../lib/scope.js'
@@ -719,6 +720,157 @@ test('switching the model reads the write back', async () => {
   assert.equal(crossed.after.model, 'some-model')
 })
 
+test('a model switch moves the conversation in front of you, not only the next one', async () => {
+  // The reported bug. dsh resolves a session's model on every read, and a
+  // session's own logged request header outranks the deployment default — so a
+  // switch that moved only the default left every conversation that had
+  // completed one turn running on the model it started with, while reporting
+  // success. The switch has to reach the live agent as well.
+  let saved = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
+  const agentDefaultModel = {
+    currentSelection: () => saved,
+    saveSelection: async (selection) => { saved = selection },
+  }
+
+  const listeners = new Map()
+  const agent = {
+    options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    session: {
+      id: 'session-live',
+      requestHeader: () => ({ config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }),
+    },
+  }
+  const agents = { get: (id) => (id === 'session-live' ? agent : undefined) }
+  const ctx = mockCtx({ agents, agentDefaultModel, agentPresets: { mount: async () => {} } })
+
+  // Composed the way `resolveAgent` composes one, so the ref under test is the
+  // one that actually decides this agent's route.
+  const { setup } = composeAgent(ctx)
+  await setup({ agent, on: (event, callback) => { listeners.set(event, callback); return () => {} } })
+
+  const change = await switchModel(ctx, 'deepseek-v4-pro', 'session-live')
+  assert.equal(change.scope, 'session')
+  assert.equal(change.short, shortId('session-live'))
+  assert.equal(change.before.model, 'deepseek-v4-flash', 'measured against what the session ran, not the default')
+  assert.equal(change.after.model, 'deepseek-v4-pro')
+  assert.equal(saved.model, 'deepseek-v4-pro', 'and the default moves with it, so the next session agrees')
+
+  // The proof: walk the two listeners the way a turn does. Assembly snapshots
+  // the selection, the request reads the snapshot.
+  await listeners.get('system-prompt/assemble')({}, {}, async () => ({ variables: {} }))
+  const request = await listeners.get('agent/request')({}, async () => ({ provider: 'deepseek-official', model: 'deepseek-v4-flash' }))
+  assert.equal(request.model, 'deepseek-v4-pro', 'the next turn asks for the model that was picked')
+})
+
+test('a session this plugin did not compose is switched through the harness gateway', async () => {
+  // An agent the web UI composed installed its listeners first, and cordis runs
+  // a waterfall outermost-first — so this plugin's own ref would be overridden
+  // there. `apiProxy` is the seam that owns that agent's selection.
+  let saved = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
+  const calls = []
+  const agent = { options: {}, session: { id: 'session-web', requestHeader: () => undefined } }
+  const ctx = mockCtx({
+    agents: { get: (id) => (id === 'session-web' ? agent : undefined) },
+    agentDefaultModel: { currentSelection: () => saved, saveSelection: async (s) => { saved = s } },
+    apiProxy: {
+      sessions: {
+        selectModel: async (request) => {
+          calls.push(request.payload)
+          return { rpcId: request.rpcId, result: { ok: true, value: { selected: request.payload } } }
+        },
+      },
+    },
+  })
+
+  const change = await switchModel(ctx, 'deepseek-v4-pro', 'session-web')
+  assert.equal(change.scope, 'session')
+  assert.deepEqual(calls, [{ sessionId: 'session-web', provider: 'deepseek-official', model: 'deepseek-v4-pro' }])
+
+  // A refusal is the user's answer, not a swallowed warning: the default moved
+  // and the session did not, and only saying so makes that recoverable.
+  const refusing = mockCtx({
+    agents: { get: () => agent },
+    agentDefaultModel: { currentSelection: () => saved, saveSelection: async (s) => { saved = s } },
+    apiProxy: { sessions: { selectModel: async () => ({ result: { ok: false, error: { message: 'model does not accept image input' } } }) } },
+  })
+  await assert.rejects(
+    () => switchModel(refusing, 'text-only-model', 'session-web'),
+    (error) => error.key === 'error.modelNotApplied' && /image input/.test(error.params.reason),
+  )
+})
+
+test('a switch aimed at a cold session changes nothing at all', async () => {
+  // Not even the default: a switch that half-happened is worse than one that
+  // did not, because the user asked for that session specifically.
+  let saved = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
+  const ctx = mockCtx({
+    agents: { get: () => undefined },
+    agentDefaultModel: { currentSelection: () => saved, saveSelection: async (s) => { saved = s } },
+  })
+
+  await assert.rejects(
+    () => switchModel(ctx, 'deepseek-v4-pro', 'session-cold'),
+    (error) => error.key === 'error.sessionNotLive',
+  )
+  assert.equal(saved.model, 'deepseek-v4-flash', 'the default is left where it was')
+
+  // With no session named, the same call is the plain default switch it always was.
+  const change = await switchModel(ctx, 'deepseek-v4-pro')
+  assert.equal(change.scope, 'default')
+  assert.equal(saved.model, 'deepseek-v4-pro')
+})
+
+test('a session reports the model it last ran on, not the one it was minted with', async () => {
+  // The statistics strip and the picker both read this. A session switched
+  // since it was created still carries its creation-time route, so trusting
+  // that is how a switch that worked reads as one that did not.
+  const agent = {
+    options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    session: {
+      id: 'session-live',
+      requestHeader: () => ({ config: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } }),
+    },
+  }
+  const ctx = mockCtx({
+    agents: { get: (id) => (id === 'session-live' ? agent : undefined) },
+    agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-v4-flash' }) },
+    llm: { listProviders: () => [], listModels: async () => [] },
+  })
+
+  const shown = await readModelSelection(ctx, 'session-live')
+  assert.equal(shown.current.model, 'deepseek-v4-flash', 'the default is still the default')
+  assert.equal(shown.session.current.model, 'deepseek-v4-pro', 'and the session says what it is really running')
+  assert.equal(shown.session.short, shortId('session-live'))
+
+  // A header that throws is a missing answer, not a broken read.
+  const broken = mockCtx({
+    agents: { get: () => ({ options: { provider: 'p', model: 'minted' }, session: { id: 's', requestHeader: () => { throw new Error('unfoldable log') } } }) },
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'default' }) },
+    llm: { listProviders: () => [], listModels: async () => [] },
+  })
+  assert.equal((await readModelSelection(broken, 's')).session.current.model, 'minted')
+
+  // Nothing named, nothing extra reported — the shape the old callers expect.
+  assert.equal((await readModelSelection(ctx)).session, undefined)
+})
+
+test('a settings switch follows a running session and never wakes a cold one', async () => {
+  // Waking a session just to retarget it would be work nobody asked for, and
+  // `resolveAgent` — the other way to find a session — would do exactly that.
+  const sessions = [{ id: 'session-cold' }, { id: 'session-warm' }, { id: 'session-busy' }]
+  const agents = { get: (id) => (id === 'session-cold' ? undefined : { session: { id } }) }
+  const ctx = mockCtx({ agents })
+
+  assert.equal(liveSessionFor(ctx, sessions), 'session-warm', 'the newest live one, when nothing is working')
+  assert.equal(
+    liveSessionFor(ctx, sessions, { isRunning: (id) => id === 'session-busy' }),
+    'session-busy',
+    'the one mid-turn wins, the same way a prompt lands on it',
+  )
+  assert.equal(liveSessionFor(ctx, [{ id: 'session-cold' }]), undefined, 'all cold means no session to follow')
+  assert.equal(liveSessionFor(mockCtx({}), sessions), undefined, 'no agents service, nothing to follow')
+})
+
 test('a model switch that did not persist is reported as a failure', async () => {
   // saveSelection() is a silent no-op without a settings provider. Reporting
   // success here would leave the user believing every later session runs on a
@@ -1129,7 +1281,7 @@ test('a turn started outside Discord becomes one message, then one edit', async 
     logger: { warn() {}, debug() {} },
     client: () => ({ channels: { fetch: async () => channel } }),
     runs: new Map(),
-    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+    resolver: { locate: async () => ({ channelId: 'chan-1', parentId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
   })
 
   const session = { id: 'session-web-1' }
@@ -1167,7 +1319,7 @@ test('the mirror stays out of the way of runs Discord itself started', async () 
     logger: { warn() {}, debug() {} },
     client: () => ({ channels: { fetch: async () => channel } }),
     runs,
-    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+    resolver: { locate: async () => ({ channelId: 'chan-1', parentId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
   })
 
   mirror.observe({ id: 'session-ours' }, assistantEvent('driven from Discord'))
@@ -1185,7 +1337,7 @@ test('subagent chatter is held back unless it was asked for', async () => {
     logger: { warn() {}, debug() {} },
     client: () => ({ channels: { fetch: async () => channel } }),
     runs: new Map(),
-    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: true, title: 'Alpha' }), forget() {} },
+    resolver: { locate: async () => ({ channelId: 'chan-1', parentId: 'chan-1', isChild: true, title: 'Alpha' }), forget() {} },
   })
 
   const quiet = build(mirrorConfig())
@@ -1197,6 +1349,212 @@ test('subagent chatter is held back unless it was asked for', async () => {
   loud.observe({ id: 'session-child' }, assistantEvent('a subagent thinking out loud'))
   await loud.flush()
   assert.equal(sent.length, 1)
+})
+
+test('a thread name carries the session id, and only the id is read back', async () => {
+  // The title half is decoration: Discord rate-limits thread renames to about
+  // two per ten minutes, so the name is written once and a session that gets a
+  // title later keeps the thread it already has. Identification must therefore
+  // never depend on the half that goes stale.
+  assert.equal(threadName('1c4e03fa', 'Bomberman'), '1c4e03fa · Bomberman')
+  assert.equal(threadName('1c4e03fa'), '1c4e03fa', 'a session with no title yet still gets a usable name')
+  assert.equal(threadName('1c4e03fa', '  spaced   out \n name '), '1c4e03fa · spaced out name')
+  assert.ok(threadName('1c4e03fa', 'x'.repeat(200)).length <= 100, 'Discord caps a thread name at 100')
+
+  assert.equal(shortFromThreadName('1c4e03fa · Bomberman'), '1c4e03fa')
+  assert.equal(shortFromThreadName('1c4e03fa'), '1c4e03fa')
+  assert.equal(shortFromThreadName('1c4e03fa · 改名之後的標題'), '1c4e03fa', 'a renamed thread still resolves')
+  assert.equal(shortFromThreadName('general'), undefined, 'someone else\'s thread is not ours')
+  assert.equal(shortFromThreadName('1c4e03fax · nope'), undefined, 'the id is exactly eight hex characters')
+  assert.equal(shortFromThreadName(undefined), undefined)
+})
+
+test('with threads on, a session resolves to its own thread and every surface follows', async () => {
+  // The mirror, the approval cards and the question cards all place messages
+  // through `locate`. Threading only the mirror would put a session's
+  // transcript in its thread and its approvals in the parent channel.
+  const registry = { list: () => [{ id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: ['session-aaaa1111-0000-0000-0000-000000000000'] }] }
+  const created = []
+  const parent = {
+    id: 'chan-1',
+    threads: {
+      fetchActive: async () => ({ threads: new Map() }),
+      create: async (options) => { created.push(options); return { id: `thread-${created.length}` } },
+    },
+  }
+  const client = () => ({ channels: { fetch: async (id) => (id === 'chan-1' ? parent : null) } })
+  const ctx = mockCtx({ workspaceRegistry: registry, sessionQuery })
+  const resolver = createChannelResolver({ ctx, client, config: { sessionThreads: true } })
+  resolver.update(new Map([['chan-1', 'ws-1']]))
+
+  const placed = await resolver.locate('session-aaaa1111-0000-0000-0000-000000000000')
+  assert.equal(placed.channelId, 'thread-1', 'messages go to the thread')
+  assert.equal(placed.parentId, 'chan-1', 'and the announcement still has a channel to index into')
+  // The session's own title when the harness has folded one — that is what
+  // makes a sidebar of threads readable. The workspace title is the fallback
+  // for the usual case: a session seconds old, which has no title yet.
+  assert.equal(created[0].name, `${shortId('session-aaaa1111-0000-0000-0000-000000000000')} · title for aaaa`)
+
+  // Two mirror ticks for one session arrive milliseconds apart, and both pass
+  // the "no thread yet" check unless the work is serialized. Concurrent, not
+  // sequential — the sequential case is answered by the map alone. A fresh
+  // resolver, because the first one has already cached this session's thread.
+  const racing = createChannelResolver({ ctx, client, config: { sessionThreads: true } })
+  racing.update(new Map([['chan-1', 'ws-1']]))
+  const [a, b] = await Promise.all([
+    racing.locate('session-aaaa1111-0000-0000-0000-000000000000'),
+    racing.locate('session-aaaa1111-0000-0000-0000-000000000000'),
+  ])
+  assert.equal(a.channelId, b.channelId)
+  assert.equal(created.length, 2, 'two racing callers opened one thread between them, not two')
+
+  // A restart finds what the last process opened, by name, and opens nothing.
+  const reopened = createChannelResolver({
+    ctx,
+    config: { sessionThreads: true },
+    client: () => ({
+      channels: {
+        async fetch() {
+          return {
+            id: 'chan-1',
+            threads: {
+              fetchActive: async () => ({ threads: new Map([['t', { id: 'thread-from-before', name: `${shortId('session-aaaa1111-0000-0000-0000-000000000000')} · Alpha` }]]) }),
+              create: async () => { throw new Error('a thread that already exists must be adopted, not duplicated') },
+            },
+          }
+        },
+      },
+    }),
+  })
+  reopened.update(new Map([['chan-1', 'ws-1']]))
+  assert.equal((await reopened.locate('session-aaaa1111-0000-0000-0000-000000000000')).channelId, 'thread-from-before')
+})
+
+test('backfill opens threads for sessions that already exist, and cards them once', async () => {
+  // Without this the setting is invisible until something happens, which is
+  // exactly how a working feature gets reported as broken: threads are opened
+  // lazily, so a person who turns it on and opens Discord sees an empty panel.
+  const registry = { list: () => [{ id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: ['session-aaaa1111-0000-0000-0000-000000000000'] }] }
+  const posted = []
+  const opened = []
+  let listCalls = 0
+  let nextThread = 0
+  const parent = {
+    id: 'chan-1',
+    threads: {
+      fetchActive: async () => ({ threads: new Map() }),
+      create: async (options) => { opened.push(options.name); nextThread += 1; return { id: `thread-${nextThread}` } },
+    },
+  }
+  const threadChannels = new Map()
+  const client = () => ({
+    channels: {
+      fetch: async (id) => {
+        if (id === 'chan-1') return parent
+        if (!threadChannels.has(id)) threadChannels.set(id, { id, send: async (payload) => { posted.push({ id, payload }) } })
+        return threadChannels.get(id)
+      },
+    },
+  })
+
+  const ctx = mockCtx({
+    workspaceRegistry: registry,
+    sessionQuery: {
+      ...sessionQuery,
+      listSessions: async () => { listCalls += 1; return sessionQuery.listSessions() },
+      filterEvents: async () => [{ seq: 1, type: 'user/message', time: 1, text: '幫我強化 AI' }],
+    },
+  })
+  const resolver = createChannelResolver({ ctx, client, config: { sessionThreads: true } })
+  resolver.update(new Map([['chan-1', 'ws-1']]))
+
+  const backfill = createThreadBackfill({
+    ctx,
+    config: { sessionThreads: true, sessionThreadsBackfill: 5, allowRun: true },
+    resolver,
+    client,
+    logger: { warn() {}, info() {} },
+    t: translator('en'),
+  })
+
+  backfill.run([{ id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: ['session-aaaa1111-0000-0000-0000-000000000000'] }])
+  await backfill.idle()
+
+  assert.equal(opened.length, 1, 'the existing session got a thread without having to say anything first')
+  assert.equal(posted.length, 1, 'and the thread opens onto something rather than nothing')
+  assert.match(posted[0].payload.embeds[0].toJSON().description, /幫我強化 AI/, 'the card quotes what the session was actually doing')
+  assert.ok(posted[0].payload.components.length > 0, 'and carries the controls, so a tap works without typing')
+
+  // A second reconcile — which happens on every new session — re-sweeps, because
+  // "the threads match the sessions" has to keep being true. It must find the
+  // work already done rather than opening a second thread or stapling a second
+  // card to the top of the first.
+  backfill.run([{ id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: ['session-aaaa1111-0000-0000-0000-000000000000'] }])
+  await backfill.idle()
+  assert.equal(opened.length, 1, 'a session that already has a thread is left alone')
+  assert.equal(posted.length, 1, 'and is never carded twice')
+
+  // It has to actually re-look, not short-circuit on "this workspace is done" —
+  // that is what lets a session created while the bot was offline, or one whose
+  // announcement failed, get its thread without waiting for a restart.
+  assert.ok(listCalls > 1, 'the second reconcile re-examined the workspace rather than skipping it')
+
+  // Turned off, it is the lazy behavior it replaced.
+  const quiet = createThreadBackfill({
+    ctx,
+    config: { sessionThreads: true, sessionThreadsBackfill: 0, allowRun: true },
+    resolver,
+    client,
+    logger: { warn() {}, info() {} },
+    t: translator('en'),
+  })
+  quiet.run([{ id: 'ws-2', title: 'Beta', path: '/work/beta', sessionIds: [] }])
+  await quiet.idle()
+  assert.equal(opened.length, 1, 'a zero cap waits for activity, like before')
+})
+
+test('a thread adopted from a previous process is not carded again', async () => {
+  // The card belongs to the moment a thread is opened. A restart that swept up
+  // last process's threads must not staple a fresh summary to the top of each
+  // one — that is a duplicate per restart, forever.
+  const registry = { list: () => [{ id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: ['session-aaaa1111-0000-0000-0000-000000000000'] }] }
+  const short = shortId('session-aaaa1111-0000-0000-0000-000000000000')
+  const ctx = mockCtx({ workspaceRegistry: registry, sessionQuery })
+  const resolver = createChannelResolver({
+    ctx,
+    config: { sessionThreads: true },
+    client: () => ({
+      channels: {
+        fetch: async () => ({
+          id: 'chan-1',
+          threads: {
+            fetchActive: async () => ({ threads: new Map([['t', { id: 'thread-old', name: `${short} · Alpha` }]]) }),
+            create: async () => { throw new Error('an adopted thread must not be reopened') },
+          },
+        }),
+      },
+    }),
+  })
+  resolver.update(new Map([['chan-1', 'ws-1']]))
+
+  const placed = await resolver.locate('session-aaaa1111-0000-0000-0000-000000000000')
+  assert.equal(placed.channelId, 'thread-old')
+  assert.equal(placed.threadCreated, false, 'adopted, not opened — so nothing new is posted into it')
+})
+
+test('without threads on, nothing about the old placement changes', async () => {
+  const registry = { list: () => [{ id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: ['session-aaaa1111-0000-0000-0000-000000000000'] }] }
+  const ctx = mockCtx({ workspaceRegistry: registry, sessionQuery })
+  const resolver = createChannelResolver({
+    ctx,
+    config: { sessionThreads: false },
+    client: () => { throw new Error('a deployment without threads must never reach for the client') },
+  })
+  resolver.update(new Map([['chan-1', 'ws-1']]))
+
+  const placed = await resolver.locate('session-aaaa1111-0000-0000-0000-000000000000')
+  assert.equal(placed.channelId, 'chan-1')
+  assert.equal(placed.parentId, 'chan-1', 'destination and parent are the same id, which is why old callers still work')
 })
 
 test('the resolver places a session by account, then by cwd', async () => {
@@ -1318,6 +1676,48 @@ test('permissions switch either the default or one running session', async () =>
   assert.equal(state.options.length, 2)
 })
 
+test('a permission switch nobody scoped moves the conversation and the default together', async () => {
+  // The same shape as the model switch, and for the same reason: typing
+  // `/dsh permission read-only` in a workspace channel is a question about the
+  // work in front of you. Moving only a setting for sessions that do not exist
+  // yet answers a question nobody asked.
+  let fallback = 'workspace-write'
+  const session = { id: 'session-live', events: [] }
+  const permissions = {
+    names: ['workspace-write', 'read-only'],
+    get defaultPreset() { return fallback },
+    current: (events) => events.filter((event) => event.type === 'permission/preset').at(-1)?.data.preset ?? 'workspace-write',
+    optionOf: (name) => ({ name }),
+    resolve: (name) => ({ sandbox: name, approval: 'ask' }),
+    set: (target, name) => target.events.push({ type: 'permission/preset', data: { preset: name } }),
+  }
+  const ctx = mockCtx({
+    permissionPresets: permissions,
+    agents: { get: (id) => (id === 'session-live' ? { session } : undefined) },
+    settings: { update: async (ns, patch) => { if (ns === 'permission') fallback = patch.defaultPreset } },
+  })
+
+  const both = await switchPermissionPreset(ctx, 'read-only', 'session-live', { andDefault: true })
+  assert.equal(both.scope, 'session')
+  assert.equal(both.andDefault, true)
+  assert.equal(permissions.current(session.events), 'read-only', 'the conversation moved')
+  assert.equal(fallback, 'read-only', 'and so did the default, so the next session agrees')
+
+  // A settings write that does not stick leaves the session alone rather than
+  // diverging it from a default that never changed. The write that can fail
+  // runs first precisely so this is the outcome.
+  const stuck = mockCtx({
+    permissionPresets: { ...permissions, get defaultPreset() { return 'read-only' } },
+    agents: { get: () => ({ session }) },
+    settings: { update: async () => {} },
+  })
+  await assert.rejects(
+    () => switchPermissionPreset(stuck, 'workspace-write', 'session-live', { andDefault: true }),
+    (error) => error.key === 'error.permissionNotSaved',
+  )
+  assert.equal(permissions.current(session.events), 'read-only', 'the session is where the successful switch left it')
+})
+
 test('the menu card carries its whole state in its own component ids', async () => {
   const state = { session: 'ab12cd34', setting: 'preset', view: 'trace' }
   const decoded = decodeMenu(encodeMenu('view', state))
@@ -1371,6 +1771,176 @@ test('the menu refuses a switch the plugin row has not enabled', async () => {
     () => applyMenu({ interaction, ctx, config: { allowRun: false, categoryName: 'dsh', traceLimit: 25 }, workspace, t: translator('en') }),
     (error) => error.key === 'error.writeDisabled',
   )
+})
+
+test('a read-only card moves the default and leaves the running session alone', async () => {
+  // The model switch is the one `allowRun` leaves open, because moving the
+  // default changes nothing that is already running. Retargeting a live session
+  // does change it — so the ungated card must not reach for one, or a read-only
+  // deployment could steer a conversation someone else is in the middle of.
+  let saved = { provider: 'p', model: 'before' }
+  const agent = { options: {}, session: { id: 'session-live', requestHeader: () => undefined } }
+  const ctx = mockCtx({
+    sessionQuery,
+    agents: { get: () => agent },
+    agentDefaultModel: { currentSelection: () => saved, saveSelection: async (selection) => { saved = selection } },
+    llm: { listProviders: () => [], listModels: async () => [] },
+    apiProxy: { sessions: { selectModel: async () => { throw new Error('a read-only card must never reach the per-session seam') } } },
+  })
+  const workspace = { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [], synthetic: false }
+  const interaction = { customId: encodeMenu('apply-model', { view: 'sessions' }), values: ['after'] }
+  const config = { allowRun: false, categoryName: 'dsh', traceLimit: 25 }
+
+  const card = await applyMenu({ interaction, ctx, config, workspace, t: translator('en') })
+  assert.equal(saved.model, 'after', 'the default still moves — that half was never gated')
+  assert.match(card.embeds.at(-1).toJSON().title, /default model/, 'and the card says it was the default that moved')
+
+  // Enabled, the same click follows the session the card is showing.
+  const applied = []
+  const live = mockCtx({
+    sessionQuery,
+    agents: { get: () => agent },
+    agentDefaultModel: { currentSelection: () => saved, saveSelection: async (selection) => { saved = selection } },
+    llm: { listProviders: () => [], listModels: async () => [] },
+    apiProxy: {
+      sessions: {
+        selectModel: async (request) => {
+          applied.push(request.payload.model)
+          return { rpcId: request.rpcId, result: { ok: true, value: { selected: request.payload } } }
+        },
+      },
+    },
+  })
+  const moved = await applyMenu({ interaction, ctx: live, config: { ...config, allowRun: true }, workspace, t: translator('en') })
+  assert.deepEqual(applied, ['after'])
+  assert.match(moved.embeds.at(-1).toJSON().title, /session model/)
+})
+
+test('a read-only deployment refuses a model switch aimed at a named session', async () => {
+  // Degrading is right when nobody named a session — the default is still a
+  // real change and the footer says only that moved. A named one is a request
+  // that cannot be honored quietly: answering it with a switch that skipped the
+  // session would be the same lie this whole change exists to remove.
+  let saved = { provider: 'p', model: 'before' }
+  const replies = []
+  const router = createRouter({
+    ctx: mockCtx({
+      sessionQuery,
+      agents: { get: () => ({ options: {}, session: { id: 'x', requestHeader: () => undefined } }) },
+      agentDefaultModel: { currentSelection: () => saved, saveSelection: async (selection) => { saved = selection } },
+      llm: { listProviders: () => [], listModels: async () => [] },
+    }),
+    config: normalizeConfig({ guildId: '942602494134071356', allowRun: false }),
+    logger: { warn() {}, debug() {}, info() {} },
+    resync: async () => ({ mapping: new Map(), created: [], orphans: [], skipped: [], privacy: 'enforced' }),
+    mappedCount: () => 0,
+    runs: new Map(),
+    ownedAgents: new Map(),
+    activity: { isRunning: () => false },
+  })
+
+  /**
+   * One `/dsh model` invocation.
+   * @param {string | null} session - the `session` option, or null when omitted.
+   * @returns {Promise<void>} resolution once the reply is written.
+   */
+  const invoke = (session) => router.handleInteraction({
+    guildId: '942602494134071356',
+    guild: { ownerId: 'owner-1' },
+    user: { id: 'owner-1' },
+    locale: 'en-US',
+    channel: { topic: '[dsh:ws-1] /work/alpha' },
+    channelId: 'channel-1',
+    options: {
+      getSubcommand: () => 'model',
+      getString: (name) => (name === 'to' ? 'after' : session),
+    },
+    isButton: () => false,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => false,
+    isAutocomplete: () => false,
+    isChatInputCommand: () => true,
+    commandName: 'dsh',
+    deferReply: async () => {},
+    editReply: async (payload) => { replies.push(payload) },
+  })
+
+  await invoke('aaaa1111')
+  assert.match(replies.at(-1).embeds[0].toJSON().description, /allowRun/, 'a named session is refused, in words')
+  assert.equal(saved.model, 'before', 'and nothing moved')
+
+  await invoke(null)
+  assert.equal(saved.model, 'after', 'unnamed, the default still moves')
+  assert.match(replies.at(-1).embeds[0].toJSON().title, /default model/)
+})
+
+test('a command typed in a session thread acts on that session, not the newest one', async () => {
+  // The reason threads are worth having beyond tidiness: outside one, "which
+  // conversation did that mean" is inferred from what is running. Inside one,
+  // the thread is the answer — so a command there acts on its session even when
+  // a newer one is live, and it reaches the parent channel for the workspace
+  // because a thread carries no topic of its own.
+  let switched
+  let saved = { provider: 'p', model: 'before' }
+  const target = 'session-aaaa1111-0000-0000-0000-000000000000'
+  const newer = 'session-cccc3333-0000-0000-0000-000000000000'
+  const replies = []
+  const router = createRouter({
+    ctx: mockCtx({
+      sessionQuery,
+      workspaceRegistry: { list: () => [{ id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [target, newer] }] },
+      // Both are live, and the thread's is deliberately not the newest.
+      agents: { get: (id) => ({ options: {}, session: { id, requestHeader: () => undefined } }) },
+      agentDefaultModel: {
+        currentSelection: () => saved,
+        saveSelection: async (selection) => { saved = selection },
+      },
+      llm: { listProviders: () => [], listModels: async () => [] },
+      apiProxy: {
+        sessions: {
+          selectModel: async (request) => {
+            switched = request.payload.sessionId
+            return { rpcId: request.rpcId, result: { ok: true, value: { selected: request.payload } } }
+          },
+        },
+      },
+    }),
+    config: normalizeConfig({ guildId: '942602494134071356', allowRun: true }),
+    logger: { warn() {}, debug() {}, info() {} },
+    resync: async () => ({ mapping: new Map(), created: [], orphans: [], skipped: [], privacy: 'enforced' }),
+    mappedCount: () => 0,
+    runs: new Map(),
+    ownedAgents: new Map(),
+    activity: { isRunning: () => false },
+  })
+
+  await router.handleInteraction({
+    guildId: '942602494134071356',
+    guild: { ownerId: 'owner-1' },
+    user: { id: 'owner-1' },
+    locale: 'en-US',
+    // A thread: no topic of its own, its name carries the session, and the
+    // workspace anchor lives on the parent.
+    channel: {
+      isThread: () => true,
+      name: `${shortId(target)} · 強化炸彈超人AI策略`,
+      parentId: 'chan-1',
+      parent: { topic: '[dsh:ws-1] /work/alpha' },
+    },
+    channelId: 'thread-1',
+    options: { getSubcommand: () => 'model', getString: (name) => (name === 'to' ? 'after' : null) },
+    isButton: () => false,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => false,
+    isAutocomplete: () => false,
+    isChatInputCommand: () => true,
+    commandName: 'dsh',
+    deferReply: async () => {},
+    editReply: async (payload) => { replies.push(payload) },
+  })
+
+  assert.equal(switched, target, 'the thread\'s session, even though another is live and newer')
+  assert.match(replies.at(-1).embeds[0].toJSON().title, /session model/)
 })
 
 test('a menu click is acknowledged rather than dropped on the floor', async () => {
@@ -1455,7 +2025,7 @@ test('a turn whose workspace has no channel yet is held, not dropped', async () 
     logger: { warn() {}, debug() {} },
     client: () => ({ channels: { fetch: async () => channel } }),
     runs: new Map(),
-    resolver: { locate: async () => ({ channelId, isChild: false, title: 'Alpha' }), forget() {} },
+    resolver: { locate: async () => ({ channelId, parentId: channelId, isChild: false, title: 'Alpha' }), forget() {} },
   })
 
   const session = { id: 'session-new-workspace' }
@@ -1481,7 +2051,7 @@ test('a long turn cannot buffer the transcript of everything it read', async () 
     logger: { warn() {}, debug() {} },
     client: () => ({ channels: { fetch: async () => channel } }),
     runs: new Map(),
-    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+    resolver: { locate: async () => ({ channelId: 'chan-1', parentId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
   })
 
   const session = { id: 'session-long' }
@@ -1519,8 +2089,8 @@ test('a filtered subagent does not block announcements for real sessions', async
     runs: new Map(),
     resolver: {
       locate: async (id) => (id.startsWith('session-child')
-        ? { channelId: 'chan-1', isChild: true, title: 'Alpha' }
-        : { channelId: 'chan-1', isChild: false, title: 'Alpha' }),
+        ? { channelId: 'chan-1', parentId: 'chan-1', isChild: true, title: 'Alpha' }
+        : { channelId: 'chan-1', parentId: 'chan-1', isChild: false, title: 'Alpha' }),
       forget() {},
     },
   })
@@ -1623,7 +2193,7 @@ test('a mirrored turn shows how far through its todo list it is', async () => {
     logger: { warn() {}, debug() {} },
     client: () => ({ channels: { fetch: async () => channel } }),
     runs: new Map(),
-    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+    resolver: { locate: async () => ({ channelId: 'chan-1', parentId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
     activity,
   })
 
@@ -2315,7 +2885,7 @@ test('a resumed session is not announced as a new one', async () => {
     logger: { warn() {}, debug() {} },
     client: () => ({ channels: { fetch: async () => channel } }),
     runs: new Map(),
-    resolver: { locate: async () => ({ channelId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
+    resolver: { locate: async () => ({ channelId: 'chan-1', parentId: 'chan-1', isChild: false, title: 'Alpha' }), forget() {} },
   })
 
   // Restarting the harness re-enters every persisted session, which is the

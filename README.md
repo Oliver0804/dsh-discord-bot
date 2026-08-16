@@ -42,7 +42,7 @@ Nothing listens. There is no inbound attack surface to add.
 it happens, whoever started it: the web UI, the tui, a cron entry. Off by default, because it
 continuously exports session content to a chat platform.
 
-**Writes** — register a workspace (`/dsh workspace`), and switch the default model (`/dsh model`),
+**Writes** — register a workspace (`/dsh workspace`), and switch the model (`/dsh model`),
 the agent preset (`/dsh preset`) or the permission preset (`/dsh permission`).
 
 **Runs work** — `/dsh run <prompt>` delivers a prompt to the workspace's agent and streams the turn
@@ -181,15 +181,15 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 | `/dsh subagents [session] [deep]` | Subagents and whether each is **running** or inactive. |
 | `/dsh run <prompt>` | Send work to the workspace's agent and watch the turn. Needs `allowRun`. |
 | `/dsh lineage [session]` | Ancestor and descendant sessions. |
-| `/dsh model [to]` | Show the default model, or switch it (autocompleted from the provider catalog, falling back to the current model when the catalog is empty). |
+| `/dsh model [to] [session]` | Show or switch the model (autocompleted from the provider catalog, falling back to the current model when the catalog is empty). A switch moves the default *and* the running session it is aimed at — the channel's own by default — because a session keeps the model it last ran on until something moves it. |
 | `/dsh todos [session]` | The todo list a running session is working through. |
 | `/dsh context [session]` | The prompt sections, tools and skills that session actually has. |
 | `/dsh export [session]` | The whole trajectory as a Markdown attachment. |
 | `/dsh cmd [name] [input]` | List or run **this harness's own commands** — `/compact`, `/plan`, whatever the deployment registers. Running one needs `allowRun`. |
 | `/dsh stop [session]` | Interrupt the turn a session is running right now. Needs `allowRun`. |
 | `/dsh rewind [session]` | Continue from an earlier prompt, in a new session. Needs `allowRun`. |
-| `/dsh preset [to]` | Show or switch the agent preset new sessions are composed from. Switching needs `allowRun`. |
-| `/dsh permission [to] [session]` | Show or switch permissions: the default for new sessions, or one running session. Switching needs `allowRun`. |
+| `/dsh preset [to]` | Show or switch the agent preset new sessions are composed from. New ones only: the harness fixes a session's preset once it has taken a turn, so unlike the model this cannot follow a running conversation. Switching needs `allowRun`. |
+| `/dsh permission [to] [session]` | Show or switch permissions. Naming a session changes that one alone; not naming one changes the channel's running conversation *and* the default. Switching needs `allowRun`. |
 | `/dsh workspace <path>` | Register a directory as a workspace and give it a channel (path is autocompleted). |
 | `/dsh status` | Mounted services, session counts, the workspace list, and how many channels are mapped. |
 | `/dsh sync` | Re-sync the category, its channels, and their privacy now — and file any session sitting in a registered workspace's directory that nothing had attached to it. |
@@ -456,6 +456,8 @@ costs double.
 | `mirrorSubagents` | `false` | Include subagent sessions in the mirror. One turn can fan out to a dozen. |
 | `mirrorNewSessions` | `true` | Announce a newly created session in its channel. Only applies while `mirror` is on. |
 | `mirrorApprovals` | `false` | Answer approval questions for sessions this bot did not start. **A web-side user then waits out the card's two minutes.** |
+| `sessionThreads` | `false` | Give each session its own thread under the workspace channel, instead of interleaving every session's turns in one. Also removes the guesswork from targeting: a command or a message typed inside a thread acts on *that* session, however many others are live. |
+| `sessionThreadsBackfill` | `5` | How many of each workspace's most recent sessions get a thread up front, each opening onto a card with what it was last doing. `0` waits for a session to say something first. Needs `mirror`, since the card quotes the conversation. |
 | `answerQuestions` | `false` | Answer `ask_user_question` from Discord. Claims the seam where it is free; where a UI owns it, mirrors the gateway's questions instead so **both surfaces can answer and the first one wins**. |
 | `followNewWorkspaces` | `true` | Create a channel when a session appears for an unmapped workspace. |
 | `traceLimit` | `25` | Default entries per `/dsh trace` — also the default per `/dsh timeline`. |
