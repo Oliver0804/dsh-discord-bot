@@ -456,7 +456,7 @@ costs double.
 | `mirrorSubagents` | `false` | Include subagent sessions in the mirror. One turn can fan out to a dozen. |
 | `mirrorNewSessions` | `true` | Announce a newly created session in its channel. Only applies while `mirror` is on. |
 | `mirrorApprovals` | `false` | Answer approval questions for sessions this bot did not start. **A web-side user then waits out the card's two minutes.** |
-| `sessionThreads` | `false` | Give each session its own thread under the workspace channel, instead of interleaving every session's turns in one. Also removes the guesswork from targeting: a command or a message typed inside a thread acts on *that* session, however many others are live. |
+| `sessionThreads` | `false` | Give each session its own thread under the workspace channel, instead of interleaving every session's turns in one. Inside the thread, turns are posted as **independent messages** (prompt, each assistant reply, done), not one rewritten card, so the thread reads like a scrollable conversation. Also removes the guesswork from targeting: a command or a message typed inside a thread acts on *that* session, however many others are live. |
 | `sessionThreadsBackfill` | `5` | How many of each workspace's most recent sessions get a thread up front, each opening onto a card with what it was last doing. `0` waits for a session to say something first. Needs `mirror`, since the card quotes the conversation. |
 | `answerQuestions` | `false` | Answer `ask_user_question` from Discord. Claims the seam where it is free; where a UI owns it, mirrors the gateway's questions instead so **both surfaces can answer and the first one wins**. |
 | `followNewWorkspaces` | `true` | Create a channel when a session appears for an unmapped workspace. |
@@ -564,7 +564,7 @@ what executes inside dsh.
 git clone https://github.com/Oliver0804/dsh-discord-bot
 cd dsh-discord-bot
 npm install       # discord.js only
-npm test          # 76 unit tests — no network, no harness, no Discord account
+npm test          # 108 unit tests — no network, no harness, no Discord account
 ```
 
 Layout:

@@ -397,7 +397,7 @@ LLM 與工具耗時、首字時間、解碼速率、快取命中、token 數。�
 | `mirrorSubagents` | `false` | 推播是否包含子代理工作階段。一個 turn 可以展開出十幾個。 |
 | `mirrorNewSessions` | `true` | 新工作階段建立時在頻道公告一則。只在 `mirror` 開啟時有作用。 |
 | `mirrorApprovals` | `false` | 連不是這個 bot 發起的工作階段，授權問題也送到 Discord。**web 端的人得等這張卡片的兩分鐘。** |
-| `sessionThreads` | `false` | 每個工作階段在工作區頻道底下開自己的討論串，而不是所有工作階段的 turn 交錯在同一個頻道。也順帶消除目標的猜測：在討論串裡打的指令或訊息就是對**那個**工作階段，不管同時有幾個在跑。 |
+| `sessionThreads` | `false` | 每個工作階段在工作區頻道底下開自己的討論串，而不是所有工作階段的 turn 交錯在同一個頻道。討論串內改為**獨立訊息**（prompt、每則 assistant 回覆、完成），不是一張重寫的卡片，讀起來像一般對話紀錄。也順帶消除目標的猜測：在討論串裡打的指令或訊息就是對**那個**工作階段，不管同時有幾個在跑。 |
 | `sessionThreadsBackfill` | `5` | 每個工作區最近幾個工作階段一開始就給討論串，每條開起來就有一張卡片說它上次在做什麼。`0` 表示等工作階段自己說話才開。需要 `mirror`，因為卡片會引用對話內容。 |
 | `answerQuestions` | `false` | 在 Discord 回答 `ask_user_question`。接縫沒人佔就接管；被 UI 佔走則改鏡射 gateway 的待答問題，**兩邊都能回答，誰先答誰算數**。 |
 | `followNewWorkspaces` | `true` | 出現未對應工作區的新工作階段時自動建立頻道。 |
@@ -490,7 +490,7 @@ Slash 指令仍可用，因為 interaction 自己帶 token。
 git clone https://github.com/Oliver0804/dsh-discord-bot
 cd dsh-discord-bot
 npm install       # 只有 discord.js
-npm test          # 76 個單元測試 —— 不需網路、不需 harness、不需 Discord 帳號
+npm test          # 108 個單元測試 —— 不需網路、不需 harness、不需 Discord 帳號
 ```
 
 檔案分工：
