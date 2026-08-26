@@ -280,9 +280,13 @@ isolate realm 裡，從 host plane 用 `ctx.get(…)` 什麼都拿不到。現�
 `sessions.fork()` —— 那個呼叫會在 store 裡建立一個 live 子工作階段，而 `agents.create`
 必須擁有自己驅動的工作階段，所以用它等於每次回溯都丟下一個沒人管的工作階段。
 
-**丟進頻道的檔案會變成上下文。** 聊天模式下，訊息附帶的文字檔會被讀取並附加到同一則提示 ——
+**丟進頻道的檔案會變成上下文。** 聊天模式下，訊息附帶的檔案會被讀取並附加到同一則提示 ——
 打字的內容仍然排在第一，那才是逐字稿會顯示的東西。只抓訊息自己的 Discord CDN 附件
-（絕不抓訊息文字裡的 URL）、只讀文字型別、最多 5 個檔案、每個上限 100 KB。
+（絕不抓訊息文字裡的 URL）、最多 5 個檔案。文字檔以文字讀入，每個上限 100 KB。
+**圖片**（PNG、JPEG、WebP、GIF）走 harness 自己的路，而不是當成文字解碼：bot 把
+bytes 交給 `ctx.attachments`，由它依自己的上限（`imageLimits`）驗證、正規化並持久化，
+提示裡帶的是參照而非內容。沒有組合 attachment store 的 profile 維持原本純文字行為；
+被跳過的檔案一定會有 ⚠️ 反應，不會無聲無息。
 
 ### 看見不是你發起的工作
 
@@ -423,8 +427,9 @@ Token 也可以來自環境變數 `DSH_DISCORD_BOT_TOKEN` 或 `DISCORD_BOT_TOKEN
   每個工作階段的對話都會持續匯出到 Discord —— 包含別人在這台機器上開始、而他從未選擇這件事的工作。
 - **`/dsh cmd`、`/dsh stop`、`/dsh rewind` 都需要 `allowRun`**：三者分別是「造成工作」、
   「終止別人可能正在看的工作」、「產生一個新代理」，沒有一個是讀取，`allowRun` 關閉時一律不可用。
-- **附件只從 Discord CDN 讀取**，不會去抓訊息文字裡的 URL，只讀文字型別，最多 5 個檔案、
-  每個 100 KB。
+- **附件只從 Discord CDN 讀取**，不會去抓訊息文字裡的 URL，最多 5 個檔案。文字檔以
+  文字讀入、每個上限 100 KB；圖片走 harness 自己的 admission 政策 —— 由 `ctx.attachments`
+  驗證、正規化並持久化，絕不把圖直接塞進提示 —— 沒有組合 attachment store 時一律跳過。
 - **切換 preset 或 permission 需要 `allowRun`**：這兩者本身不執行任何東西，但它們決定之後的 turn
   被允許做什麼 —— 用哪些工具組成、指令是否進 sandbox 或需要批准 —— 所以放寬它們的關卡等同執行，
   而不是等同讀取。

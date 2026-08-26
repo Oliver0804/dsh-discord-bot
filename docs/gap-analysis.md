@@ -104,13 +104,14 @@
 - **成本**：中。安全上這是「緊急停止」，建議即使 `allowRun` 關閉也可用於自己發起的
   run。
 
-### 9. 聊天模式收圖 / 附件（視覺輸入）
+### 9. 聊天模式收圖 / 附件（視覺輸入）✅ 已實作（v0.4.0）
 - **API**：`attachments.imageLimits` / `validateImage` / `saveImage` / `readImage`。
-- **現況**：`listenToMessages` 只吃文字。Discord 訊息帶圖 → 完全被忽略。
-- **做法**：下載 Discord 附件 bytes → `validateImage`（遵守 `imageLimits` 政策）→
-  `saveImage` 拿 ref → 把 image ref 組進 user message content → 支援視覺的模型就看得到
-  圖。跟 `/dsh run` 的 prompt 一起用。
-- **成本**：中。
+- ~~**現況**：`listenToMessages` 只吃文字。Discord 訊息帶圖 → 完全被忽略。~~
+- **做法**（已照此落地）：下載 Discord 附件 bytes（串流讀取、以 `imageLimits.maxImageBytes`
+  為上限，宣告大小超標直接跳過不抓）→ 一則訊息的圖整批交給 `saveImages`（admission
+  原子性：一批被拒就是全部不進）→ 拿到 ref 後以 `{type:'image', attachment: ref}` block
+  組進 user message content。只收 v1 支援的 PNG/JPEG/WebP/GIF；profile 沒有組合
+  attachment store 時退回純文字行為，圖一律記入 skipped（⚠️ 反應）。
 
 ### 10. 長 prompt —— modal 取代 string option
 - **現況**：`/dsh run` 的 prompt option 上限 1800 字；Discord modal text input 可到 4000。

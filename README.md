@@ -314,11 +314,17 @@ from `sessions.fork()` — that call creates a live child session in the store,
 and since `agents.create` must own the session it drives, using it would abandon
 one session per rewind.
 
-**Files dropped into a channel become context.** In chat mode, text attachments
-on a message are read and appended to the prompt they came with — the typed text
+**Files dropped into a channel become context.** In chat mode, attachments on a
+message are read and appended to the prompt they came with — the typed text
 stays first, which is what the transcript shows. Only the message's own Discord
-CDN attachments are fetched (never a URL from the text), only textual types, at
-most five files and 100 KB each.
+CDN attachments are fetched (never a URL from the text), at most five files.
+Text files are read as text, up to 100 KB each. **Images** — PNG, JPEG, WebP,
+GIF — take the harness's own path instead of being decoded as text: the bot
+hands the bytes to `ctx.attachments`, which validates, normalizes, and stores
+them durably under its own limits (`imageLimits`), and the prompt carries a
+reference block. A profile without a composed attachment store keeps the old
+text-only behavior; skipped files always get the ⚠️ reaction rather than
+silence.
 
 ### Watching work you did not start
 
@@ -488,7 +494,10 @@ The token may also come from `DSH_DISCORD_BOT_TOKEN` or `DISCORD_BOT_TOKEN`. Pre
   causes work, ends work someone at the machine may be watching, or mints an
   agent — none of them are reads, and none are available with `allowRun` off.
 - **Attachments are read from Discord's CDN only**, never from a URL in the
-  message text, only for textual types, and capped at five files of 100 KB.
+  message text, and capped at five files. Text files are read as text, 100 KB
+  each; images go through the harness's own admission policy — validated,
+  normalized, and durably stored by `ctx.attachments`, never inlined into the
+  prompt — and are skipped entirely when no attachment store is composed.
 - **Switching preset or permission needs `allowRun`.** Neither runs anything itself, but both decide
   what a later turn may do — which tools it is composed with, and whether its commands are sandboxed
   or approved — so widening them is gated like execution, not like a read.

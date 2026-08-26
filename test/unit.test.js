@@ -2402,6 +2402,196 @@ test('attachments become context blocks, filtered by type and size', async () =>
   }
 })
 
+test('dropped images ride the harness attachment seam into image blocks', async () => {
+  const original = globalThis.fetch
+  const pngBytes = new TextEncoder().encode('png-bytes-here')
+  globalThis.fetch = async () => ({ ok: true, text: async () => 'contents', arrayBuffer: async () => pngBytes.buffer.slice(0) })
+
+  const saved = []
+  const store = {
+    imageLimits: { maxImageBytes: 1_000 },
+    saveImages: async (inputs) => {
+      saved.push(...inputs)
+      return inputs.map((input, index) => ({
+        attachmentId: `att-${index}`,
+        mediaType: input.mediaType,
+        bytes: input.data.byteLength,
+        width: 32,
+        height: 32,
+        name: input.name,
+      }))
+    },
+  }
+
+  try {
+    const message = {
+      attachments: {
+        size: 2,
+        values: () => [
+          { name: 'shot.png', size: 14, contentType: 'image/png', url: 'https://cdn.discordapp.com/shot.png' },
+          { name: 'notes.md', size: 200, contentType: 'text/markdown', url: 'https://cdn.discordapp.com/notes.md' },
+        ].values(),
+      },
+    }
+
+    const { blocks, read, skipped } = await readAttachments(message, { store })
+    assert.deepEqual(skipped, [])
+    // Text blocks land first, images follow once admitted — within each kind,
+    // message order holds.
+    assert.deepEqual(read, ['notes.md', 'shot.png'])
+    assert.deepEqual(
+      saved,
+      [{ name: 'shot.png', mediaType: 'image/png', data: new Uint8Array(pngBytes) }],
+      'the store receives raw bytes with the declared type, never base64 text',
+    )
+    const imageBlock = blocks.find((block) => block.type === 'image')
+    assert.ok(imageBlock, 'the admitted image becomes one image content block')
+    assert.equal(imageBlock.attachment.attachmentId, 'att-0')
+    assert.equal(imageBlock.attachment.mediaType, 'image/png')
+    assert.equal(imageBlock.attachment.name, 'shot.png')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('images without a composed store are skipped; their text siblings still read', async () => {
+  const original = globalThis.fetch
+  let fetched = 0
+  globalThis.fetch = async () => {
+    fetched += 1
+    return { ok: true, text: async () => 'contents', arrayBuffer: async () => new ArrayBuffer(8) }
+  }
+
+  try {
+    const message = {
+      attachments: {
+        size: 2,
+        values: () => [
+          { name: 'shot.png', size: 900, contentType: 'image/png', url: 'https://cdn.discordapp.com/shot.png' },
+          { name: 'notes.md', size: 200, contentType: 'text/markdown', url: 'https://cdn.discordapp.com/notes.md' },
+        ].values(),
+      },
+    }
+
+    const { blocks, read, skipped } = await readAttachments(message)
+    assert.deepEqual(read, ['notes.md'])
+    assert.deepEqual(skipped, ['shot.png'])
+    assert.equal(fetched, 1, 'only the text sibling reaches the CDN')
+    assert.equal(blocks.length, 1)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('an unsupported or over-budget image is refused before any download', async () => {
+  const original = globalThis.fetch
+  let fetched = 0
+  globalThis.fetch = async () => {
+    fetched += 1
+    return { ok: true, text: async () => 'contents', arrayBuffer: async () => new ArrayBuffer(8) }
+  }
+  const store = {
+    imageLimits: { maxImageBytes: 1_000 },
+    saveImages: async () => [],
+  }
+
+  try {
+    const message = {
+      attachments: {
+        size: 2,
+        values: () => [
+          // Version one accepts PNG/JPEG/WebP/GIF only.
+          { name: 'diagram.bmp', size: 10, contentType: 'image/bmp', url: 'https://cdn.discordapp.com/diagram.bmp' },
+          // Discord's declared size already breaks the store's budget.
+          { name: 'big.png', size: 2_000, contentType: 'image/png', url: 'https://cdn.discordapp.com/big.png' },
+        ].values(),
+      },
+    }
+
+    const { blocks, read, skipped } = await readAttachments(message, { store })
+    assert.deepEqual(read, [])
+    assert.deepEqual(skipped, ['diagram.bmp', 'big.png'])
+    assert.equal(fetched, 0, 'a declared refusal must not spend a download')
+    assert.equal(blocks.length, 0)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a refused image batch costs every image and none of the prompt', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, text: async () => 'contents', arrayBuffer: async () => new TextEncoder().encode('bytes').buffer })
+  const store = {
+    imageLimits: { maxImageBytes: 1_000_000 },
+    saveImages: async () => {
+      // Admission validates atomically: one bad member refuses the batch.
+      throw Object.assign(new Error('IMAGE_TOO_LARGE'), { code: 'IMAGE_TOO_LARGE' })
+    },
+  }
+
+  try {
+    const message = {
+      attachments: {
+        size: 3,
+        values: () => [
+          { name: 'a.png', size: 5, contentType: 'image/png', url: 'https://cdn.discordapp.com/a.png' },
+          { name: 'b.jpg', size: 5, contentType: 'image/jpeg', url: 'https://cdn.discordapp.com/b.jpg' },
+          { name: 'notes.md', size: 200, contentType: 'text/markdown', url: 'https://cdn.discordapp.com/notes.md' },
+        ].values(),
+      },
+    }
+
+    const { blocks, read, skipped } = await readAttachments(message, { store })
+    assert.deepEqual(read, ['notes.md'])
+    assert.deepEqual(skipped, ['a.png', 'b.jpg'])
+    assert.ok(blocks.every((block) => block.type === 'text'), 'no half-admitted image block survives')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('an image whose body runs over the budget is not submitted truncated', async () => {
+  const original = globalThis.fetch
+  let cancelled = false
+
+  // A stream that would never end on its own: if the reader does not stop at
+  // the cap, this test hangs rather than quietly passing.
+  globalThis.fetch = async () => ({
+    ok: true,
+    body: {
+      getReader: () => ({
+        read: async () => ({ done: false, value: new Uint8Array(600).fill(1) }),
+        cancel: async () => { cancelled = true },
+      }),
+    },
+  })
+
+  let admitted = 0
+  const store = {
+    imageLimits: { maxImageBytes: 1_000 },
+    saveImages: async (inputs) => {
+      admitted += inputs.length
+      return inputs.map((input) => ({ attachmentId: 'att', mediaType: input.mediaType, bytes: input.data.byteLength, width: 1, height: 1 }))
+    },
+  }
+
+  try {
+    const message = {
+      attachments: {
+        values: () => [{ name: 'big.gif', size: 100, contentType: 'image/gif', url: 'https://cdn.discordapp.com/big.gif' }].values(),
+      },
+    }
+
+    const { read, skipped } = await readAttachments(message, { store })
+    assert.deepEqual(read, [], 'the body outgrew its declared size and its budget')
+    assert.deepEqual(skipped, ['big.gif'], 'truncated raster bytes are never offered for admission')
+    assert.ok(cancelled, 'the download is hung up on once over budget')
+    assert.equal(admitted, 0)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 test('an oversized body is cut off at the ceiling, not drained and then sliced', async () => {
   const original = globalThis.fetch
   let cancelled = false
