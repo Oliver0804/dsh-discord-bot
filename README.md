@@ -191,6 +191,8 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 | `/dsh preset [to]` | Show or switch the agent preset new sessions are composed from. New ones only: the harness fixes a session's preset once it has taken a turn, so unlike the model this cannot follow a running conversation. Switching needs `allowRun`. |
 | `/dsh permission [to] [session]` | Show or switch permissions. Naming a session changes that one alone; not naming one changes the channel's running conversation *and* the default. Switching needs `allowRun`. |
 | `/dsh workspace <path>` | Register a directory as a workspace and give it a channel (path is autocompleted). |
+| `/dsh archive` | Archive this channel's Discord history and its workspace session trajectories as one Markdown attachment. |
+| `/dsh remove-channel` | Delete this Discord channel after showing a confirm button. |
 | `/dsh status` | Mounted services, session counts, the workspace list, and how many channels are mapped. |
 | `/dsh sync` | Re-sync the category, its channels, and their privacy now — and file any session sitting in a registered workspace's directory that nothing had attached to it. |
 
@@ -542,8 +544,10 @@ you know the bot is managing it rather than merely observing it.
   warning and retries; the harness boots and runs regardless. This matters because Cordis treats an
   activation throw as a failed composition — `dsh-host-webserver` genuinely stops the process when
   its port is taken, and a chat bridge must not behave that way.
-- **Channels are never deleted.** A workspace removed from dsh leaves its channel and history in
-  place; `/dsh status` reports the leftovers.
+- **Reconcile never deletes channels.** A workspace removed from dsh leaves its channel and history
+  in place; `/dsh status` reports the leftovers. If you want to remove a channel deliberately, run
+  `/dsh archive` first, then `/dsh remove-channel` and confirm. If that workspace is still registered,
+  a later `/dsh sync` will create a fresh channel for it.
 - **The mapping lives in the channel topic** (`[dsh:<workspaceId>] …`), not in memory, so it
   survives restarts and channel renames. Clear the topic to unmap a channel.
 - **Discord caps a category at 50 channels.** Beyond that, workspaces stay unmapped and the

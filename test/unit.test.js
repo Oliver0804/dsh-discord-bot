@@ -55,6 +55,8 @@ import {
   renderPresets,
   renderPresetSwitched,
   renderSessions,
+  renderArchive,
+  renderRemoveChannelConfirm,
   renderHelp,
   renderStatus,
   renderSubagents,
@@ -937,6 +939,37 @@ test('write-command renders are well formed', () => {
   const noChannel = renderWorkspaceCreated({ title: 'g', path: '/g', sessions: 0, alreadyRegistered: true }, undefined).embeds[0].toJSON()
   assert.ok(noChannel.title.includes('already registered'))
   assert.ok(noChannel.fields[1].value.includes('not created'))
+})
+
+test('an archive bundles every session export into one Markdown file', () => {
+  const archive = renderArchive(
+    { title: 'Gamma', path: '/work/gamma' },
+    [
+      { short: 'ab12cd34', title: 'first', markdown: '# session ab12cd34\n\nhello', entries: 3 },
+      { short: 'ef56ab78', title: undefined, markdown: '# session ef56ab78\n\nworld', entries: 5 },
+    ],
+    undefined,
+    '**alice** · 2026-01-01T00:00:00.000Z\nhello from discord',
+  )
+
+  const file = archive.files[0]
+  assert.match(file.name, /^workspace-gamma-archive\.md$/)
+  assert.match(file.attachment.toString('utf8'), /# Gamma/)
+  assert.match(file.attachment.toString('utf8'), /## Discord channel/)
+  assert.match(file.attachment.toString('utf8'), /hello from discord/)
+  assert.match(file.attachment.toString('utf8'), /## session ab12cd34/)
+  assert.match(archive.embeds[0].toJSON().description, /2 session\(s\) · 8 entries/)
+})
+
+test('remove-channel only posts a confirmation card with a destructive button', () => {
+  const card = renderRemoveChannelConfirm({ title: 'Gamma' }, 'gamma')
+  const embed = card.embeds[0].toJSON()
+  const button = card.components[0].toJSON().components[0]
+
+  assert.match(embed.title, /remove channel/i)
+  assert.match(embed.description, /#gamma/)
+  assert.equal(button.style, 4, 'the confirm button is danger-red')
+  assert.match(button.custom_id, /^dsh:remove:/)
 })
 
 test('a prompt becomes an identified frozen user message', () => {

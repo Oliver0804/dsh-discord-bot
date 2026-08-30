@@ -43,6 +43,18 @@ function dshHome() {
 }
 
 /**
+ * Quote a value as a single-quoted YAML scalar. A literal quote is doubled —
+ * YAML's own escape — because a category or home directory named with an
+ * apostrophe ("Oliver's dsh") would otherwise produce a row that fails to
+ * compose.
+ * @param {string | undefined} value - the raw value.
+ * @returns {string} the quoted scalar.
+ */
+function yamlQuote(value) {
+  return `'${String(value).replaceAll("'", "''")}'`
+}
+
+/**
  * Build the YAML row appended to the profile's patch layer.
  *
  * An id-targeted config override, not an `insert`. The package's own bundle
@@ -65,9 +77,9 @@ function renderRow(answers) {
     `- id: ${ROW_ID}`,
     '  config:',
     `    guildId: '${answers.guildId}'`,
-    `    categoryName: '${answers.categoryName}'`,
+    `    categoryName: ${yamlQuote(answers.categoryName)}`,
   ]
-  if (answers.tokenFile !== undefined) lines.push(`    tokenFile: '${answers.tokenFile}'`)
+  if (answers.tokenFile !== undefined) lines.push(`    tokenFile: ${yamlQuote(answers.tokenFile)}`)
   if (answers.allowedUserIds.length > 0) {
     lines.push('    allowedUserIds:')
     for (const id of answers.allowedUserIds) lines.push(`      - '${id}'`)
@@ -266,6 +278,7 @@ async function main() {
     `  1. Invite the bot: scopes bot + applications.commands, permissions=268487696 (Manage Roles is required for private channels).`,
     `  2. Restart dsh:  dsh --profile ${profile}`,
     `  3. In Discord, open the "${categoryName}" category and run /dsh status`,
+    '  4. The bot is read-only by default: add `allowRun: true` to the row above to drive agents from Discord, and `mirror: true` to watch work started outside it.',
     '',
   ].join('\n'))
 }
