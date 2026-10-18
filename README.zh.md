@@ -171,7 +171,7 @@ id 指定覆寫補上：
 | `/dsh subagents [session] [deep]` | 子代理清單，以及每個是**運行中**還是已結束。 |
 | `/dsh run <prompt>` | 把工作送給該工作區的代理並即時觀看。需要 `allowRun`。 |
 | `/dsh lineage [session]` | 上游與下游的工作階段關係。 |
-| `/dsh model [to] [session]` | 顯示或切換模型（選項由 provider 目錄自動完成；目錄為空時退回目前模型）。切換會同時改預設值**與**它指向的執行中工作階段（預設是這個頻道自己的），因為工作階段會一直維持它上一輪跑的模型，直到有人把它換掉。 |
+| `/dsh model [to] [session]` | 顯示或切換模型（選項由所有 provider 的目錄以 `provider/model` 自動完成；目錄為空時退回目前模型）。切換會同時改預設值**與**它指向的執行中工作階段（預設是這個頻道自己的），因為工作階段會一直維持它上一輪跑的模型，直到有人把它換掉。 |
 | `/dsh todos [session]` | 執行中工作階段正在跑的待辦清單。 |
 | `/dsh context [session]` | 那個工作階段實際擁有的提示區段、工具與技能。 |
 | `/dsh export [session]` | 完整軌跡，輸出成 Markdown 附件。 |

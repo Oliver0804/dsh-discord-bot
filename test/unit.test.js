@@ -705,26 +705,40 @@ test('switching the model reads the write back', async () => {
     saveSelection: async (selection) => { saved = selection },
   }
   const llm = {
-    listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
-    listModels: async () => [
-      { id: 'deepseek-v4-flash', name: 'Flash', description: 'fast' },
-      { id: 'deepseek-v4-pro', name: 'Pro', description: 'deep' },
-    ],
+    listProviders: () => [{ id: 'openrouter', name: 'OpenRouter' }, { id: 'deepseek-official', name: 'DeepSeek' }],
+    listModels: async (provider) => (provider === 'deepseek-official'
+      ? [
+          { id: 'deepseek-v4-flash', name: 'Flash', description: 'fast' },
+          { id: 'deepseek-v4-pro', name: 'Pro', description: 'deep' },
+        ]
+      : [{ id: 'z-ai/glm-5.3-flash', name: 'GLM' }]),
   }
   const ctx = mockCtx({ agentDefaultModel, llm })
 
+  // Every provider is offered, the current one first, each under its full spec.
   const shown = await readModelSelection(ctx)
   assert.equal(shown.current.model, 'deepseek-v4-flash')
-  assert.equal(shown.models.length, 2)
+  assert.deepEqual(shown.models.map((model) => model.spec), [
+    'deepseek-official/deepseek-v4-flash',
+    'deepseek-official/deepseek-v4-pro',
+    'openrouter/z-ai/glm-5.3-flash',
+  ])
 
   const change = await switchModel(ctx, 'deepseek-v4-pro')
   assert.equal(change.before.model, 'deepseek-v4-flash')
   assert.equal(change.after.model, 'deepseek-v4-pro')
   assert.equal(change.after.provider, 'deepseek-official', 'a bare model id keeps the current provider')
 
-  const crossed = await switchModel(ctx, 'other-provider/some-model')
-  assert.equal(crossed.after.provider, 'other-provider')
-  assert.equal(crossed.after.model, 'some-model')
+  // The split is on a known provider, not the first slash.
+  const crossed = await switchModel(ctx, 'openrouter/z-ai/glm-5.3-flash')
+  assert.deepEqual(crossed.after, { provider: 'openrouter', model: 'z-ai/glm-5.3-flash' })
+
+  // A slashed model id with no known provider prefix stays on the current one.
+  const slashed = await switchModel(ctx, 'z-ai/glm-5.3-flash')
+  assert.deepEqual(slashed.after, { provider: 'openrouter', model: 'z-ai/glm-5.3-flash' })
+
+  const back = await switchModel(ctx, 'deepseek-official/deepseek-v4-pro')
+  assert.deepEqual(back.after, { provider: 'deepseek-official', model: 'deepseek-v4-pro' })
 })
 
 test('a model switch moves the conversation in front of you, not only the next one', async () => {
@@ -925,7 +939,10 @@ test('write-command renders are well formed', () => {
   const selection = {
     current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     providers: [{ id: 'deepseek-official', name: 'DeepSeek' }],
-    models: [{ id: 'deepseek-v4-flash', name: 'Flash', description: 'fast' }, { id: 'deepseek-v4-pro', name: 'Pro' }],
+    models: [
+      { provider: 'deepseek-official', id: 'deepseek-v4-flash', spec: 'deepseek-official/deepseek-v4-flash', name: 'Flash', description: 'fast' },
+      { provider: 'deepseek-official', id: 'deepseek-v4-pro', spec: 'deepseek-official/deepseek-v4-pro', name: 'Pro' },
+    ],
   }
   const shown = renderModel(selection).embeds[0].toJSON()
   assert.ok(shown.description.includes('deepseek-v4-flash'))

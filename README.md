@@ -181,7 +181,7 @@ recent sessions instead of typing a uuid — and defaults to the newest session 
 | `/dsh subagents [session] [deep]` | Subagents and whether each is **running** or inactive. |
 | `/dsh run <prompt>` | Send work to the workspace's agent and watch the turn. Needs `allowRun`. |
 | `/dsh lineage [session]` | Ancestor and descendant sessions. |
-| `/dsh model [to] [session]` | Show or switch the model (autocompleted from the provider catalog, falling back to the current model when the catalog is empty). A switch moves the default *and* the running session it is aimed at — the channel's own by default — because a session keeps the model it last ran on until something moves it. |
+| `/dsh model [to] [session]` | Show or switch the model (autocompleted from every provider's catalog as `provider/model`, falling back to the current model when the catalog is empty). A switch moves the default *and* the running session it is aimed at — the channel's own by default — because a session keeps the model it last ran on until something moves it. |
 | `/dsh todos [session]` | The todo list a running session is working through. |
 | `/dsh context [session]` | The prompt sections, tools and skills that session actually has. |
 | `/dsh export [session]` | The whole trajectory as a Markdown attachment. |
