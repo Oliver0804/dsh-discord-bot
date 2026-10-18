@@ -370,42 +370,31 @@ config:
 
 ### Answering the model's questions
 
-`ask_user_question` parks a tool call until a human answers. Unlike approvals,
-that seam takes **exactly one provider** and throws on the second — so
-`answerQuestions` is off by default and is not merely a try/catch: in a web
-profile `dsh-host-apiproxy` owns the seam and the person at the browser is the
-one watching for that questionnaire.
+`ask_user_question` parks a tool call until a human answers. Since dsh 0.2 the
+harness asks through the `user-questions/request` waterfall, and every answerer
+is a listener on it — the web UI's included, which forwards the question to the
+browser and waits. `answerQuestions` is off by default because turning it on
+puts a second surface in front of every question.
 
-The seam is claimed **after** the bot connects to Discord, never at activation,
-and that ordering is load-bearing rather than tidy: a plugin row in the patch
-layer is applied *before* the bundles it sits after, so claiming it at
-activation makes `dsh-host-apiproxy` fail its own registration and **the whole
-harness refuses to boot**. Waiting until the gateway is up puts this bot last in
-line — wherever a UI owns the seam it has already taken it and this one declines.
+The listener is installed **after** the bot connects to Discord (a card can only
+be posted through a live client) and it goes **first** in the waterfall. A
+waterfall calls its listeners one after another, so a listener that waited
+behind the web UI would only ever see the questions the browser passed on.
+Instead the bot posts its cards *and* hands the question on, at the same time.
 
-Declining used to end it, which left the case this bot exists for unserved: a
-turn that stops to ask a question stops until somebody is at the browser. So a
-bot that loses the seam goes in the other way. It is a plugin inside the same
-cordis context as the gateway, which makes `ctx.apiProxy` — the very object the
-browser talks to over HTTP — a direct call from here, with no port, no
-credentials and no second carrier. Subscribing to its event stream yields the
-same pending questions the web UI renders, and answers go back through the same
-entry point the web UI uses.
-
-**Both surfaces stay live.** The gateway removes a pending question before
-settling it, so whoever answers first wins and the other card retracts itself —
-answer on your phone or at the browser, whichever you reach. What this mode
-never does is decide anything: it does not own the ask, so an unanswered card
-expires quietly and says the question is still waiting in the web UI. Cancelling
-would settle a question someone may be reading right now.
+**Both surfaces stay live, and the first answer wins.** Answer at the browser
+and the Discord card retracts itself. Answer on your phone and that answer
+settles the ask; the browser's copy has no way to be withdrawn from here, so it
+stays until the turn moves on. With no browser attached the Discord card is the
+only answerer. A card nobody answers expires after fifteen minutes: if the
+browser still has the question it says so and leaves it there, otherwise the
+ask is **rejected** — a tool call blocked forever is worse than one that was
+cancelled.
 
 With it on, each question arrives as a card with a menu, gated by the same
 allowlist. If the question has options you can pick one; either way a
 **✍️ Custom answer** button opens a modal for free text, so an open-ended
-question is answerable too. An unanswered card **rejects** the ask after fifteen
-minutes — there is no `next()` to hand it back with, and a tool call blocked
-forever is worse than one that was cancelled.
-
+question is answerable too. 
 ### The menu card
 
 `/dsh menu` posts one card that covers the command surface without typing — which matters on the
@@ -466,7 +455,7 @@ costs double.
 | `mirrorApprovals` | `false` | Answer approval questions for sessions this bot did not start. **A web-side user then waits out the card's two minutes.** |
 | `sessionThreads` | `false` | Give each session its own thread under the workspace channel, instead of interleaving every session's turns in one. Inside the thread, turns are posted as **independent messages** (prompt, each assistant reply, done), not one rewritten card, so the thread reads like a scrollable conversation. Also removes the guesswork from targeting: a command or a message typed inside a thread acts on *that* session, however many others are live. |
 | `sessionThreadsBackfill` | `5` | How many of each workspace's most recent sessions get a thread up front, each opening onto a card with what it was last doing. `0` waits for a session to say something first. Needs `mirror`, since the card quotes the conversation. |
-| `answerQuestions` | `false` | Answer `ask_user_question` from Discord. Claims the seam where it is free; where a UI owns it, mirrors the gateway's questions instead so **both surfaces can answer and the first one wins**. |
+| `answerQuestions` | `false` | Answer `ask_user_question` from Discord, alongside the web UI: **both surfaces can answer and the first one wins**. |
 | `followNewWorkspaces` | `true` | Create a channel when a session appears for an unmapped workspace. |
 | `traceLimit` | `25` | Default entries per `/dsh trace` — also the default per `/dsh timeline`. |
 | `sessionLimit` | `15` | Default sessions per `/dsh sessions`. |
@@ -564,7 +553,7 @@ you know the bot is managing it rather than merely observing it.
 
 ## Requirements
 
-- dsh `0.1.0-rc.6` or newer, with `sessionQuery` composed (every profile built on `dsh-base` has it)
+- dsh `0.2.0-rc.2` or newer, with `sessionQuery` composed (every profile built on `dsh-base` has it)
 - Node.js 20+
 
 ## Development
@@ -595,8 +584,7 @@ Layout:
 | `lib/mirror.js` | The push side: buffering, one message per turn, the call budget |
 | `lib/activity.js` | Who is working right now, from `agent/status` |
 | `lib/scope.js` | Reading services that live inside an agent's preset realm |
-| `lib/questions.js` | The question card, and the `ask_user_question` provider when this bot claims the seam |
-| `lib/questions-mirror.js` | The same card driven through `ctx.apiProxy`, when a UI owns the seam |
+| `lib/questions.js` | The question card, and the `user-questions/request` listener that races it against the web UI |
 | `lib/attachments.js` | Channel files, read into prompt content blocks |
 | `lib/routing.js` | Session → workspace → channel, cached, shared with approvals |
 | `lib/menu.js` | The `/dsh menu` card and its stateless components |

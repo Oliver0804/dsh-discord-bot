@@ -18,7 +18,6 @@ import { createActivityTracker } from '../lib/activity.js'
 import { assembleContextFor, serviceForAgent } from '../lib/scope.js'
 import { readAttachments } from '../lib/attachments.js'
 import { answerQuestionModal, installQuestionProvider } from '../lib/questions.js'
-import { installQuestionMirror } from '../lib/questions-mirror.js'
 import { actionButtons, decodeAction, isActionInteraction } from '../lib/actions.js'
 import { applyMenu, buildMenu, decodeMenu, encodeMenu, isMenuInteraction } from '../lib/menu.js'
 import { fileOrphanSessions, listWorkspaces, suggestDirectories } from '../lib/workspaces.js'
@@ -238,12 +237,15 @@ test('command descriptions carry Discord localizations', () => {
 
 test('the cache hit rate is read over every billed prompt bucket', async () => {
   const projection = (tokenUsage) => mockCtx({
-    sessionProjectionCache: {
-      coldSnapshot: async () => ({
-        values: {
-          sessionStats: { turns: 2, steps: 8, llmMs: 4000, toolMs: 500, ttftMs: 900, ttftSteps: 3, decodeMs: 2000, decodeTokens: 300 },
-          tokenUsage,
+    sessionQuery: {
+      observeSession: async () => ({
+        projections: {
+          values: {
+            sessionStats: { turns: 2, steps: 8, llmMs: 4000, toolMs: 500, ttftMs: 900, ttftSteps: 3, decodeMs: 2000, decodeTokens: 300 },
+            tokenUsage,
+          },
         },
+        [Symbol.dispose]() {},
       }),
     },
   })
@@ -289,7 +291,7 @@ test('a model lookup that throws costs the price, not the whole strip', async ()
     tokenUsage: { uncachedInputTokens: 1000, cacheReadTokens: 9000, outputTokens: 400 },
   }
   const withServices = (services) => mockCtx({
-    sessionProjectionCache: { coldSnapshot: async () => ({ values }) },
+    sessionQuery: { observeSession: async () => ({ projections: { values }, [Symbol.dispose]() {} }) },
     ...services,
   })
 
@@ -664,13 +666,13 @@ test('a trajectory keeps narrative events and takes the tail', async () => {
 })
 
 test('subagent entries are flattened to owned scalars', async () => {
+  // `listChildren` returns bare catalog rows since dsh 0.2, so both listings
+  // come from `listDescendants`; the shallow one keeps depth 1.
   const subagents = {
-    listChildren: async () => [
-      { kind: 'child', id: 'session-1111', activity: 'running', mode: 'continuable', label: 'reviewer', hasChildren: true },
-      { kind: 'diagnostic', id: 'session-2222', reason: 'corrupt' },
-    ],
     listDescendants: async () => [
+      { kind: 'child', id: 'session-1111', activity: 'running', mode: 'continuable', label: 'reviewer', hasChildren: true, depth: 1 },
       { kind: 'child', id: 'session-3333', activity: 'inactive', mode: 'one-shot', hasChildren: false, depth: 2, parentId: 'session-1111' },
+      { kind: 'diagnostic', id: 'session-2222', reason: 'corrupt', depth: 1 },
     ],
   }
   const ctx = mockCtx({ subagents })
@@ -681,9 +683,12 @@ test('subagent entries are flattened to owned scalars', async () => {
   assert.equal(direct[1].kind, 'diagnostic')
   assert.equal(direct[1].reason, 'corrupt')
 
+  assert.equal(direct.length, 2, 'grandchildren stay out of the shallow listing')
+
   const deep = await listSubagents(ctx, 's', { deep: true })
-  assert.equal(deep[0].depth, 2)
-  assert.equal(deep[0].parentId, 'session-1111')
+  assert.equal(deep.length, 3)
+  assert.equal(deep[1].depth, 2)
+  assert.equal(deep[1].parentId, 'session-1111')
 })
 
 test('a missing service names itself instead of throwing on undefined', async () => {
@@ -767,19 +772,17 @@ test('a model switch moves the conversation in front of you, not only the next o
 test('a session this plugin did not compose is switched through the harness gateway', async () => {
   // An agent the web UI composed installed its listeners first, and cordis runs
   // a waterfall outermost-first — so this plugin's own ref would be overridden
-  // there. `apiProxy` is the seam that owns that agent's selection.
+  // there. `sessionController` is the seam that owns that agent's selection.
   let saved = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
   const calls = []
   const agent = { options: {}, session: { id: 'session-web', requestHeader: () => undefined } }
   const ctx = mockCtx({
     agents: { get: (id) => (id === 'session-web' ? agent : undefined) },
     agentDefaultModel: { currentSelection: () => saved, saveSelection: async (s) => { saved = s } },
-    apiProxy: {
-      sessions: {
-        selectModel: async (request) => {
-          calls.push(request.payload)
-          return { rpcId: request.rpcId, result: { ok: true, value: { selected: request.payload } } }
-        },
+    sessionController: {
+      selectModel: async (request) => {
+        calls.push(request)
+        return { selected: { provider: request.provider, model: request.model } }
       },
     },
   })
@@ -793,7 +796,7 @@ test('a session this plugin did not compose is switched through the harness gate
   const refusing = mockCtx({
     agents: { get: () => agent },
     agentDefaultModel: { currentSelection: () => saved, saveSelection: async (s) => { saved = s } },
-    apiProxy: { sessions: { selectModel: async () => ({ result: { ok: false, error: { message: 'model does not accept image input' } } }) } },
+    sessionController: { selectModel: async () => { throw new Error('model does not accept image input') } },
   })
   await assert.rejects(
     () => switchModel(refusing, 'text-only-model', 'session-web'),
@@ -997,6 +1000,12 @@ test('only human-visible events reach the live transcript', () => {
 
   assert.deepEqual(
     displayEntry({ type: 'tool/result', data: { message: { content: [{ content: [{ type: 'text', text: 'file.txt' }] }] } } }),
+    { label: '📄', text: 'file.txt' },
+  )
+
+  // Session format 4 (dsh 0.2) drops the `tool-result` wrapper.
+  assert.deepEqual(
+    displayEntry({ type: 'tool/result', data: { message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'file.txt' }] } } }),
     { label: '📄', text: 'file.txt' },
   )
 
@@ -1658,12 +1667,12 @@ test('switching the agent preset reads the write back and refuses a broken one',
     ],
   }
   const written = []
-  const settings = { update: async (ns, patch) => { written.push([ns, patch]); current = patch.default } }
+  const settings = { update: async (ns, patch) => { written.push([ns, patch]); current = patch.selectedDefault } }
   const ctx = mockCtx({ agentPresets: presets, settings })
 
   const change = await switchAgentPreset(ctx, 'standard')
   assert.deepEqual([change.before, change.after], ['minimal', 'standard'])
-  assert.deepEqual(written, [['agent-presets', { default: 'standard' }]])
+  assert.deepEqual(written, [['agent-preset-registry', { selectedDefault: 'standard' }]])
 
   await assert.rejects(() => switchAgentPreset(ctx, 'ghost'), (error) => error.key === 'error.brokenPreset')
   await assert.rejects(() => switchAgentPreset(ctx, 'nope'), (error) => error.key === 'error.noSuchPreset')
@@ -1683,7 +1692,7 @@ test('permissions switch either the default or one running session', async () =>
   const permissions = {
     names: ['workspace-write', 'danger-full-access'],
     get defaultPreset() { return fallback },
-    current: (events) => events.filter((event) => event.type === 'permission/preset').at(-1)?.data.preset ?? 'workspace-write',
+    current: (session) => session.events.filter((event) => event.type === 'permission/preset').at(-1)?.data.preset ?? 'workspace-write',
     optionOf: (name) => ({ name, description: `${name} bundle` }),
     resolve: (name) => ({ sandbox: name, approval: name === 'danger-full-access' ? 'never' : 'ask' }),
     set: (session, name) => session.events.push({ type: 'permission/preset', data: { preset: name } }),
@@ -1719,7 +1728,7 @@ test('a permission switch nobody scoped moves the conversation and the default t
   const permissions = {
     names: ['workspace-write', 'read-only'],
     get defaultPreset() { return fallback },
-    current: (events) => events.filter((event) => event.type === 'permission/preset').at(-1)?.data.preset ?? 'workspace-write',
+    current: (session) => session.events.filter((event) => event.type === 'permission/preset').at(-1)?.data.preset ?? 'workspace-write',
     optionOf: (name) => ({ name }),
     resolve: (name) => ({ sandbox: name, approval: 'ask' }),
     set: (target, name) => target.events.push({ type: 'permission/preset', data: { preset: name } }),
@@ -1733,7 +1742,7 @@ test('a permission switch nobody scoped moves the conversation and the default t
   const both = await switchPermissionPreset(ctx, 'read-only', 'session-live', { andDefault: true })
   assert.equal(both.scope, 'session')
   assert.equal(both.andDefault, true)
-  assert.equal(permissions.current(session.events), 'read-only', 'the conversation moved')
+  assert.equal(permissions.current(session), 'read-only', 'the conversation moved')
   assert.equal(fallback, 'read-only', 'and so did the default, so the next session agrees')
 
   // A settings write that does not stick leaves the session alone rather than
@@ -1748,7 +1757,7 @@ test('a permission switch nobody scoped moves the conversation and the default t
     () => switchPermissionPreset(stuck, 'workspace-write', 'session-live', { andDefault: true }),
     (error) => error.key === 'error.permissionNotSaved',
   )
-  assert.equal(permissions.current(session.events), 'read-only', 'the session is where the successful switch left it')
+  assert.equal(permissions.current(session), 'read-only', 'the session is where the successful switch left it')
 })
 
 test('the menu card carries its whole state in its own component ids', async () => {
@@ -1818,7 +1827,7 @@ test('a read-only card moves the default and leaves the running session alone', 
     agents: { get: () => agent },
     agentDefaultModel: { currentSelection: () => saved, saveSelection: async (selection) => { saved = selection } },
     llm: { listProviders: () => [], listModels: async () => [] },
-    apiProxy: { sessions: { selectModel: async () => { throw new Error('a read-only card must never reach the per-session seam') } } },
+    sessionController: { selectModel: async () => { throw new Error('a read-only card must never reach the per-session seam') } },
   })
   const workspace = { id: 'ws-1', title: 'Alpha', path: '/work/alpha', sessionIds: [], synthetic: false }
   const interaction = { customId: encodeMenu('apply-model', { view: 'sessions' }), values: ['after'] }
@@ -1835,12 +1844,10 @@ test('a read-only card moves the default and leaves the running session alone', 
     agents: { get: () => agent },
     agentDefaultModel: { currentSelection: () => saved, saveSelection: async (selection) => { saved = selection } },
     llm: { listProviders: () => [], listModels: async () => [] },
-    apiProxy: {
-      sessions: {
-        selectModel: async (request) => {
-          applied.push(request.payload.model)
-          return { rpcId: request.rpcId, result: { ok: true, value: { selected: request.payload } } }
-        },
+    sessionController: {
+      selectModel: async (request) => {
+        applied.push(request.model)
+        return { selected: { provider: request.provider, model: request.model } }
       },
     },
   })
@@ -1929,12 +1936,10 @@ test('a command typed in a session thread acts on that session, not the newest o
         saveSelection: async (selection) => { saved = selection },
       },
       llm: { listProviders: () => [], listModels: async () => [] },
-      apiProxy: {
-        sessions: {
-          selectModel: async (request) => {
-            switched = request.payload.sessionId
-            return { rpcId: request.rpcId, result: { ok: true, value: { selected: request.payload } } }
-          },
+      sessionController: {
+        selectModel: async (request) => {
+          switched = request.sessionId
+          return { selected: { provider: request.provider, model: request.model } }
         },
       },
     }),
@@ -2264,7 +2269,9 @@ test('harness commands are listed from the registry and run through it', async (
           { name: 'plan', description: 'Toggle plan mode', input: { hint: 'on|off' } },
         ]
       : []),
-    execute: async (subject, line) => {
+    execute: async (subject, line, attachments, signal) => {
+      assert.deepEqual(attachments, [])
+      assert.equal(signal.aborted, false)
       lines.push(line)
       if (line.startsWith('/nope')) return undefined
       return { commandId: 'c1', result: { kind: 'success', text: `ran ${line}` } }
@@ -2824,81 +2831,59 @@ test('filing needs a registry to file into', async () => {
   assert.deepEqual(empty, { filed: 0 })
 })
 
-test('losing the seam mirrors questions through the gateway instead of giving up', async () => {
-  // The web UI owns the seam, so the bot goes in the other way: same pending
-  // question, answered through the same entry point the browser uses.
-  const { channel, sent, handlers } = questionChannelStub()
-  const responses = []
-  const question = {
-    id: 'q1',
-    question: 'Where should it run?',
-    options: [{ label: 'Local' }, { label: 'Cloud' }],
-  }
-
-  const mirror = installQuestionMirror({
-    ctx: mockCtx({
-      apiProxy: {
-        events: {
-          async *mux(_request, signal) {
-            yield { rpcId: 'rpc-1', payload: { type: 'question/requested', sessionId: 'session-x', questions: [question] } }
-            await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
-          },
-        },
-        respond: async (message) => { responses.push(message); return { accepted: true } },
-      },
-    }),
+/**
+ * Install the questions listener against a stub channel and hand back the
+ * waterfall callback it registered.
+ * @param {object} channel - the stub text channel.
+ * @param {string} [channelId] - what the resolver maps the session to.
+ * @returns {{answer: Function, dispose: Function, options: object}} the listener.
+ */
+function questionListener(channel, channelId = 'c1') {
+  let answer
+  let options
+  const dispose = installQuestionProvider({
+    ctx: { on: (event, listener, opts) => { assert.equal(event, 'user-questions/request'); answer = listener; options = opts; return () => {} } },
     config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
     logger: { warn() {}, info() {} },
     client: () => ({ channels: { fetch: async () => channel }, guilds: { cache: { get: () => undefined } } }),
-    resolver: { locate: async () => ({ channelId: 'c1' }) },
+    resolver: { locate: async () => ({ channelId }) },
     runs: new Map(),
   })
-  assert.equal(typeof mirror, 'function', 'a composed gateway gives the mirror somewhere to attach')
+  return { answer, dispose, options }
+}
+
+/** `next()` with no browser attached: dsh's own end of the chain. */
+const noAnswerer = () => Promise.reject(Object.assign(new Error('no user-questions answerer accepted the request'), { code: 'NO_PROVIDER' }))
+/** `next()` with a browser that has not answered (yet). */
+const browserWaiting = () => new Promise(() => {})
+
+test('a question with no browser attached is answered from Discord', async () => {
+  const { channel, sent, handlers } = questionChannelStub()
+  const { answer, dispose, options } = questionListener(channel)
+  assert.equal(typeof dispose, 'function')
+  assert.equal(options.prepend, true, 'it must run before the web UI, or it only sees what the browser passes on')
+
+  const asked = answer({
+    questions: [{ id: 'q1', question: 'Where should it run?', options: [{ label: 'Local' }, { label: 'Cloud' }] }],
+    agent: { session: { id: 'session-x' } },
+  }, noAnswerer)
 
   await sent
   await tick()
   await handlers.collect(pick(1))
-  await tick()
 
-  assert.equal(responses.length, 1)
-  const [message] = responses
-  assert.equal(message.rpcId, 'rpc-1', 'the gateway matches the answer to its own pending ask by this id')
-  assert.equal(message.result.ok, true)
-  assert.equal(message.result.value.sessionId, 'session-x')
-  // The gateway validates every selected value against that question's own
-  // option labels, so the label travels — not the index the menu carried.
-  assert.deepEqual(message.result.value.answer.answers, [{ id: 'q1', selected: ['Cloud'] }])
-
-  mirror()
+  // The label travels — not the index the menu carried.
+  assert.deepEqual(await asked, { answers: [{ id: 'q1', selected: ['Cloud'] }] })
 })
 
 test('a typed answer travels as custom, which is the only field it is legal in', async () => {
-  // `selected` is checked against the question's options, so free text placed
-  // there is rejected as an illegal choice — the gateway's own rule.
   const { channel, sent, handlers } = questionChannelStub()
-  const responses = []
+  const { answer } = questionListener(channel)
 
-  const mirror = installQuestionMirror({
-    ctx: mockCtx({
-      apiProxy: {
-        events: {
-          async *mux(_request, signal) {
-            yield {
-              rpcId: 'rpc-2',
-              payload: { type: 'question/requested', sessionId: 'session-y', questions: [{ id: 'q1', question: 'Which port?', options: [{ label: '3000' }] }] },
-            }
-            await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
-          },
-        },
-        respond: async (message) => { responses.push(message); return { accepted: true } },
-      },
-    }),
-    config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
-    logger: { warn() {}, info() {} },
-    client: () => ({ channels: { fetch: async () => channel }, guilds: { cache: { get: () => undefined } } }),
-    resolver: { locate: async () => ({ channelId: 'c1' }) },
-    runs: new Map(),
-  })
+  const asked = answer({
+    questions: [{ id: 'q1', question: 'Which port?', options: [{ label: '3000' }] }],
+    agent: { session: { id: 'session-y' } },
+  }, browserWaiting)
 
   await sent
   await tick()
@@ -2920,101 +2905,34 @@ test('a typed answer travels as custom, which is the only field it is legal in',
     user: { id: 'owner-1', tag: 'owner#1' },
     reply: async () => {},
   }, translator('en'))
-  await new Promise((resolve) => setImmediate(resolve))
 
-  assert.deepEqual(responses[0].result.value.answer.answers, [{ id: 'q1', selected: [], custom: '8080' }])
-
-  mirror()
+  assert.deepEqual(await asked, { answers: [{ id: 'q1', selected: [], custom: '8080' }] })
 })
 
-test('a question settled elsewhere retracts its Discord card and answers nothing', async () => {
+test('a question answered in the browser first retracts its Discord card', async () => {
   const { channel, sent, edits } = questionChannelStub()
-  const responses = []
-  let push
+  const { answer } = questionListener(channel)
+  let answerInBrowser
+  const browser = () => new Promise((resolve) => { answerInBrowser = resolve })
 
-  const mirror = installQuestionMirror({
-    ctx: mockCtx({
-      apiProxy: {
-        events: {
-          async *mux(_request, signal) {
-            yield { rpcId: 'rpc-3', payload: { type: 'question/requested', sessionId: 'session-z', questions: [{ id: 'q1', question: 'Ready?', options: [{ label: 'Yes' }] }] } }
-            const next = await new Promise((resolve) => {
-              push = resolve
-              signal.addEventListener('abort', () => resolve(undefined), { once: true })
-            })
-            if (next !== undefined) yield next
-            await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
-          },
-        },
-        respond: async (message) => { responses.push(message); return { accepted: true } },
-      },
-    }),
-    config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
-    logger: { warn() {}, info() {} },
-    client: () => ({ channels: { fetch: async () => channel }, guilds: { cache: { get: () => undefined } } }),
-    resolver: { locate: async () => ({ channelId: 'c1' }) },
-    runs: new Map(),
-  })
+  const asked = answer({
+    questions: [{ id: 'q1', question: 'Ready?', options: [{ label: 'Yes' }] }],
+    agent: { session: { id: 'session-z' } },
+  }, browser)
 
   await sent
-  push({ payload: { type: 'question/resolved', sessionId: 'session-z', questionRpcId: 'rpc-3', outcome: 'answered' } })
-  await new Promise((resolve) => setImmediate(resolve))
+  answerInBrowser({ answers: [{ id: 'q1', selected: ['Yes'] }] })
+  assert.deepEqual(await asked, { answers: [{ id: 'q1', selected: ['Yes'] }] }, 'the browser\'s answer is the one returned')
   await new Promise((resolve) => setImmediate(resolve))
 
-  assert.equal(responses.length, 0, 'the mirror never settles an ask it does not own')
   assert.equal(edits.length, 1, 'the card retracts itself')
   assert.deepEqual(edits[0].components, [])
-
-  mirror()
 })
 
-test('the mirror needs a gateway, and says nothing when there is none', () => {
-  const absent = installQuestionMirror({
-    ctx: mockCtx({}),
-    config: { language: 'en', allowedUserIds: [], guildId: 'g1' },
-    logger: { warn() {}, info() {} },
-    client: () => undefined,
-    resolver: { locate: async () => ({}) },
-    runs: new Map(),
-  })
-  assert.equal(absent, undefined, 'a tui profile composes no apiproxy; there is nothing to mirror')
-})
-
-test('the questions provider declines a seam someone else owns', () => {
-  const warnings = []
-  const logger = { warn: (...args) => warnings.push(args.join(' ')), info() {} }
-
-  // A web profile's apiproxy registers first; the person is watching the
-  // browser, and taking the questionnaire away from them would be wrong.
-  const taken = installQuestionProvider({
-    ctx: mockCtx({ userQuestions: { registerProvider: () => { throw new Error('a user-questions provider is already registered') } } }),
-    config: { language: 'en', allowedUserIds: [] },
-    logger,
-    client: () => undefined,
-    resolver: { locate: async () => ({}) },
-    runs: new Map(),
-  })
-  assert.equal(taken, undefined)
-  assert.equal(warnings.length, 1)
-
-  let registered
-  const free = installQuestionProvider({
-    ctx: mockCtx({ userQuestions: { registerProvider: (provider) => { registered = provider; return () => {} } } }),
-    config: { language: 'en', allowedUserIds: [] },
-    logger,
-    client: () => undefined,
-    resolver: { locate: async () => ({}) },
-    runs: new Map(),
-  })
-  assert.equal(typeof free, 'function', 'a profile with a free seam gets a provider')
-  assert.equal(typeof registered.ask, 'function')
-
-  // No channel means no way to ask; the ask must reject rather than hang,
-  // because a single-provider seam has nobody to hand the question back to.
-  return assert.rejects(
-    () => registered.ask({ questions: [{ id: 'q', question: 'which?' }], agent: { session: { id: 'session-x' } } }),
-    (error) => error.code === 'ASK_CANCELLED',
-  )
+test('a session with no Discord channel passes its question straight on', async () => {
+  const { answer } = questionListener(undefined, undefined)
+  const passed = await answer({ questions: [{ id: 'q', question: 'which?' }], agent: { session: { id: 'session-x' } } }, async () => 'browser')
+  assert.equal(passed, 'browser')
 })
 
 test('a prompt reaches the agent that is actually working', () => {
@@ -3047,19 +2965,16 @@ test('a log that does not start at seq 0 refuses to rewind, in words', async () 
   )
 })
 
-test('the questions seam is never claimed during activation', async () => {
-  // Learned the hard way on a live boot: a plugin row in the patch layer is
-  // applied BEFORE the bundles it sits after, so claiming the single-provider
-  // user-questions seam at activation makes dsh-host-apiproxy fail its own
-  // registration — and the whole harness refuses to start. The claim has to
-  // wait until this bot is connected, by which point every UI has had its turn.
+test('the questions listener is not installed during activation', async () => {
+  // A card can only be posted through a live client, so the listener waits
+  // for `onReady`; installed earlier, it would race the browser with nothing.
   const { plugin } = await import('../lib/index.js')
 
   let claimed = 0
   let disposer
   const ctx = {
-    get: (name) => (name === 'userQuestions' ? { registerProvider: () => { claimed += 1; return () => {} } } : undefined),
-    on: () => () => {},
+    get: () => undefined,
+    on: (event) => { if (event === 'user-questions/request') claimed += 1; return () => {} },
     effect: (effect) => { disposer = effect() },
     logger: undefined,
   }
@@ -3068,9 +2983,7 @@ test('the questions seam is never claimed during activation', async () => {
   // code at all and this would pass against the very placement it guards.
   plugin.apply(ctx, { guildId: '123456789012345678', token: 'not-a-real-token', answerQuestions: true })
 
-  // Synchronous on purpose: the claim that broke the boot ran inside `start()`,
-  // before anything awaited, so it would already have happened by this line.
-  assert.equal(claimed, 0, 'activation must leave the seam alone; onReady claims it')
+  assert.equal(claimed, 0, 'activation must leave the seam alone; onReady installs it')
 
   // Releases the login retry timer and the half-connected client.
   await disposer?.()

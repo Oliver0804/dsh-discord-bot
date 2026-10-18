@@ -327,31 +327,22 @@ config:
 
 ### 回答模型提出的問題
 
-`ask_user_question` 會把一個工具呼叫**停在那裡**，等人回答。跟授權不同的是，那個接縫
-**只接受一個 provider**，註冊第二個會直接拋錯 —— 所以 `answerQuestions` 預設關閉，
-而且這不只是包個 try/catch：在 web profile 裡，`dsh-host-apiproxy` 擁有那個接縫，
-而坐在瀏覽器前面的人才是正在等那份問卷的人。
+`ask_user_question` 會把一個工具呼叫**停在那裡**，等人回答。從 dsh 0.2 起，harness 透過
+`user-questions/request` 這個 waterfall 發問，每個回答者都是掛在上面的 listener —— 網頁 UI 也是，
+它把問題轉給瀏覽器然後等。`answerQuestions` 預設關閉，因為打開之後每道問題都會多一個回答的地方。
 
-這個接縫是在 **bot 連上 Discord 之後**才接管的，絕不在啟動階段 —— 這個順序是必要的，不是講究：
-patch 層的 plugin 列會**比它後面那些 bundle 更早**套用，所以在啟動階段接管會讓
-`dsh-host-apiproxy` 自己的註冊失敗，**整個 harness 直接開不起來**。等到 gateway 起來才接管，
-就把這個 bot 排到最後 —— 只要有任何 UI 擁有那個接縫，它早就拿走了，而這個 bot 會退讓。
+這個 listener 在 **bot 連上 Discord 之後**才安裝（卡片只能透過已連線的 client 發出），
+而且排在 waterfall 的**最前面**。waterfall 會一個接一個呼叫 listener，排在網頁 UI 後面的話，
+就只看得到瀏覽器放行的問題。所以 bot 是**同時**發出自己的卡片、並把問題往下傳。
 
-過去退讓就結束了，而這正好把這個 bot 存在的理由晾在一邊：一個停下來問問題的 turn，
-會一直停到有人坐到瀏覽器前面為止。所以搶輸接縫的 bot 改走另一條路進去。它是跟 gateway
-跑在**同一個 cordis context** 裡的 plugin，所以 `ctx.apiProxy` —— 瀏覽器透過 HTTP 對話的
-那個物件本身 —— 在這裡就是一個直接呼叫：不用開埠、不用憑證、不用第二套傳輸。
-訂閱它的事件流就拿得到網頁 UI 正在顯示的那些待答問題，答案也走網頁 UI 用的同一個入口回去。
-
-**兩邊同時有效。** gateway 會在結算一個待答問題之前先把它移除，所以誰先回答誰算數，
-另一邊的卡片會自己收起來 —— 手機或瀏覽器，你先碰到哪個就用哪個。這個模式唯一不做的事
-就是替人決定：它並不擁有這次詢問，所以沒人回答的卡片只會安靜失效，並說明問題還在網頁介面等著。
-送出取消會直接結算掉一個可能有人正在看的問題。
+**兩邊同時有效，誰先答誰算數。** 在瀏覽器回答，Discord 的卡片會自己收起來；在手機回答，
+那個答案就結算這次詢問 —— 瀏覽器那份從這裡沒辦法收回，會留到 turn 往下走為止。
+沒有瀏覽器連著的時候，Discord 卡片就是唯一的回答者。沒人回答的卡片十五分鐘後失效：
+瀏覽器還開著那道問題的話，卡片會說明並把問題留給瀏覽器；否則就**拒絕**這次詢問 ——
+一個永遠卡住的工具呼叫，比一個被取消的更糟。
 
 開啟之後，每道問題會以一張帶選單的卡片送達，並受同一份允許名單保護。有選項可以直接選；
 無論有沒有選項，都可以按 **✍️ 自行輸入** 開 modal 打自由文字，所以開放式問題也能回答。
-沒人回答的卡片會在十五分鐘後**拒絕**這次詢問 —— 這裡沒有 `next()` 可以把問題交回去，
-而一個永遠卡住的工具呼叫，比一個被取消的更糟。
 
 ### 卡片選單
 
@@ -405,7 +396,7 @@ LLM 與工具耗時、首字時間、解碼速率、快取命中、token 數。�
 | `mirrorApprovals` | `false` | 連不是這個 bot 發起的工作階段，授權問題也送到 Discord。**web 端的人得等這張卡片的兩分鐘。** |
 | `sessionThreads` | `false` | 每個工作階段在工作區頻道底下開自己的討論串，而不是所有工作階段的 turn 交錯在同一個頻道。討論串內改為**獨立訊息**（prompt、每則 assistant 回覆、完成），不是一張重寫的卡片，讀起來像一般對話紀錄。也順帶消除目標的猜測：在討論串裡打的指令或訊息就是對**那個**工作階段，不管同時有幾個在跑。 |
 | `sessionThreadsBackfill` | `5` | 每個工作區最近幾個工作階段一開始就給討論串，每條開起來就有一張卡片說它上次在做什麼。`0` 表示等工作階段自己說話才開。需要 `mirror`，因為卡片會引用對話內容。 |
-| `answerQuestions` | `false` | 在 Discord 回答 `ask_user_question`。接縫沒人佔就接管；被 UI 佔走則改鏡射 gateway 的待答問題，**兩邊都能回答，誰先答誰算數**。 |
+| `answerQuestions` | `false` | 在 Discord 回答 `ask_user_question`，和網頁 UI 並行：**兩邊都能回答，誰先答誰算數**。 |
 | `followNewWorkspaces` | `true` | 出現未對應工作區的新工作階段時自動建立頻道。 |
 | `traceLimit` | `25` | `/dsh trace` 預設筆數 —— 也是 `/dsh timeline` 的預設筆數。 |
 | `sessionLimit` | `15` | `/dsh sessions` 預設筆數。 |
@@ -487,7 +478,7 @@ Slash 指令仍可用，因為 interaction 自己帶 token。
 
 ## 需求
 
-- dsh `0.1.0-rc.6` 以上，且已組合 `sessionQuery`（所有基於 `dsh-base` 的 profile 都有）
+- dsh `0.2.0-rc.2` 以上，且已組合 `sessionQuery`（所有基於 `dsh-base` 的 profile 都有）
 - Node.js 20+
 
 ## 開發與建置
@@ -517,8 +508,7 @@ npm test          # 108 個單元測試 —— 不需網路、不需 harness、�
 | `lib/mirror.js` | 推播端：緩衝、一個 turn 一則訊息、呼叫額度 |
 | `lib/activity.js` | 誰正在工作，來自 `agent/status` |
 | `lib/scope.js` | 讀取關在 agent preset realm 裡的服務 |
-| `lib/questions.js` | 問題卡片，以及本 bot 接管接縫時的 `ask_user_question` provider |
-| `lib/questions-mirror.js` | 接縫被 UI 佔走時，改用 `ctx.apiProxy` 驅動同一張卡片 |
+| `lib/questions.js` | 問題卡片，以及和網頁 UI 競速的 `user-questions/request` listener |
 | `lib/attachments.js` | 頻道檔案，讀成提示的 content block |
 | `lib/routing.js` | 工作階段 → 工作區 → 頻道的解析與快取，與授權卡片共用 |
 | `lib/menu.js` | `/dsh menu` 卡片與它的無狀態元件 |
